@@ -38,6 +38,11 @@ Join the **Forge community** on [Discord](https://discord.gg/HcPJNyD66a)!
 - No jailbreak needed, only developer mode and iOS 16-26
 - Connect your device to a PC to self-sign and upload the app file, multiple tools exist e.g. [Sideloadly](https://sideloadly.io)
 
+### 🌐 Browser (early stage)
+- Run the engine headless and play in a browser: `mvn -pl forge-gui-web -am -DskipTests package`, then
+  `java -Dforge.assets.dir=forge-gui/ -jar forge-gui-web/target/forge-gui-web-*.jar` and open <http://localhost:7860>.
+- See [forge-gui-web/README.md](forge-gui-web/README.md) for what it does and doesn't support yet.
+
 ---
 
 ## 🎮 Modes of Play

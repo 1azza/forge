@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Forge</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<div id="setup" class="setup">
+  <div class="setup-card">
+    <h1>Forge</h1>
+    <p class="sub">Magic: The Gathering rules engine</p>
+    <label for="deck">Your deck</label>
+    <select id="deck"><option value="random">Random two-colour deck</option></select>
+    <label for="opponent-deck">Opponent deck</label>
+    <select id="opponent-deck"><option value="random">Random two-colour deck</option></select>
+    <button id="start" class="primary">Start game</button>
+    <p id="setup-error" class="error" hidden></p>
+  </div>
+</div>
+
+<main id="table" class="table" hidden>
+
+  <header class="topbar">
+    <div class="turn">
+      <span id="turn-number">Turn 1</span>
+      <span id="phase-name" class="phase-name">Untap</span>
+    </div>
+    <ol id="phase-track" class="phase-track"></ol>
+    <div class="topbar-actions">
+      <button id="btn-log" class="ghost" title="Game log">Log</button>
+      <button id="btn-concede" class="ghost danger" title="Concede">Concede</button>
+    </div>
+  </header>
+
+  <section class="board">
+    <div class="seat seat-opponent">
+      <div class="player-bar" id="player-bar-opponent"></div>
+      <div class="battlefield" id="bf-opponent"></div>
+    </div>
+
+    <div class="midline">
+      <div class="stack-strip" id="stack-strip"></div>
+      <div class="combat-strip" id="combat-strip"></div>
+    </div>
+
+    <div class="seat seat-me">
+      <div class="battlefield" id="bf-me"></div>
+      <div class="player-bar" id="player-bar-me"></div>
+    </div>
+
+    <div class="hand" id="hand"></div>
+  </section>
+
+  <aside class="inspector" id="inspector" hidden>
+    <img id="inspector-img" alt="">
+    <div class="inspector-text">
+      <h3 id="inspector-name"></h3>
+      <p id="inspector-type" class="muted"></p>
+      <p id="inspector-oracle"></p>
+    </div>
+  </aside>
+
+  <aside class="logpanel" id="logpanel" hidden>
+    <header><h2>Game log</h2><button id="btn-log-close" class="ghost">Close</button></header>
+    <ol id="log-lines"></ol>
+  </aside>
+
+  <footer class="prompt" id="prompt">
+    <div class="mana-pool" id="mana-pool"></div>
+    <p class="prompt-message" id="prompt-message">Waiting…</p>
+    <div class="prompt-buttons">
+      <button id="btn-ok" class="primary" disabled>OK</button>
+      <button id="btn-cancel" class="secondary" disabled>Cancel</button>
+    </div>
+  </footer>
+</main>
+
+<div id="modal-backdrop" class="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true">
+    <h2 id="modal-title"></h2>
+    <p id="modal-message" class="modal-message"></p>
+    <div id="modal-body" class="modal-body"></div>
+    <div id="modal-buttons" class="modal-buttons"></div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<div id="connection" class="connection" hidden>Reconnecting…</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
