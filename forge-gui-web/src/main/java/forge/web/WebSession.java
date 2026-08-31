@@ -48,7 +48,6 @@ public class WebSession {
     private static final long PUSH_INTERVAL_MS = 50;
     /** How long a blocked engine call waits for a reply before giving up on the player. */
     private static final long ANSWER_TIMEOUT_MINUTES = 30;
-
     /** Phases the client stops at by default; everything else is auto-passed. */
     private static final Set<PhaseType> DEFAULT_STOPS = EnumSet.of(
             PhaseType.MAIN1,
@@ -60,6 +59,14 @@ public class WebSession {
     private final WebGuiGame guiGame;
     private final StateSerializer serializer;
     private final StateSerializer.Prompt prompt = new StateSerializer.Prompt();
+
+    /**
+     * Every live browser connection. Any number of tabs may watch the same game; when a
+     * dialog is up, whichever tab answers first wins (the second answer finds no pending
+     * request and is ignored). Before this was a single field, a second tab silently
+     * froze the first one — easy to hit when playing in a background tab.
+     */
+    private final Set<Transport> transports = ConcurrentHashMap.newKeySet();
 
     private final Map<Integer, Pending> pending = new ConcurrentHashMap<>();
     private final AtomicInteger nextRequestId = new AtomicInteger(1);
@@ -73,7 +80,6 @@ public class WebSession {
         return t;
     });
 
-    private volatile Transport transport;
     private final Set<PhaseType> stopAtPhases = EnumSet.copyOf(DEFAULT_STOPS);
 
     public WebSession() {
@@ -96,17 +102,20 @@ public class WebSession {
 
     // ------------------------------------------------------------- transport
 
-    /** Attaches a socket. A reconnecting tab gets a full board rather than a diff. */
+    /** Registers a socket and gives it a full board. Safe to call for many sockets. */
     public void attach(final Transport transport) {
-        System.out.println("Browser connected");
-        this.transport = transport;
+        transports.add(transport);
+        System.out.println("Browser connected (" + transports.size() + " open)");
         markFullResync();
         pushIfDirty();
     }
 
     public void detach(final Transport transport) {
-        if (this.transport == transport) {
-            this.transport = null;
+        transports.remove(transport);
+        // Only release parked engine calls when the last tab goes — another open tab can
+        // still answer a pending dialog.
+        if (transports.isEmpty()) {
+            abandonPendingRequests();
         }
     }
 
@@ -119,8 +128,8 @@ public class WebSession {
     }
 
     void send(final String json) {
-        final Transport t = transport;
-        if (t != null && t.isOpen()) {
+        transports.removeIf(t -> !t.isOpen());
+        for (final Transport t : transports) {
             t.send(json);
         }
     }
@@ -136,8 +145,7 @@ public class WebSession {
     }
 
     private void pushIfDirty() {
-        final Transport t = transport;
-        if (t == null || !t.isOpen()) {
+        if (transports.isEmpty()) {
             // Keep the dirty flag set: whatever changed still needs sending once a
             // browser is listening again, and nothing else will re-flag it.
             return;
@@ -154,7 +162,7 @@ public class WebSession {
                     System.out.println("push " + json.length() + "B: "
                             + json.substring(0, Math.min(400, json.length())));
                 }
-                t.send(json);
+                send(json);
             } else if (DEBUG) {
                 System.out.println("push skipped, gameView=" + (game == null ? "null" : "present"));
             }

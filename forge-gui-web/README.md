@@ -87,7 +87,9 @@ raises.
   end a game mid-mulligan, and the desktop client refuses the same request.
 - Limited, Quest, Adventure, Commander and the other game modes; the lobby only builds
   constructed matches.
-- Multiplayer and spectating. One browser session per server process.
+- Multiplayer and spectating against other humans. One engine session per server
+  process, but any number of browser tabs can watch the same game; when a prompt is up,
+  the first tab to answer wins.
 - The deck editor.
 
 ## Client

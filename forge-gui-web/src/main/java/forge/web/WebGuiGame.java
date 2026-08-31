@@ -47,7 +47,9 @@ public class WebGuiGame extends AbstractGuiGame {
 
     @Override
     protected void updateCurrentPlayer(final PlayerView player) {
-        session.markFullResync();
+        // The engine calls this on every priority change; the field only feeds the "me"
+        // marker, which is constant for the session, so a normal diff push suffices.
+        session.markDirty();
     }
 
     @Override
