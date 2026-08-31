@@ -4,6 +4,10 @@ Join the **Forge community** on [Discord](https://discord.gg/HcPJNyD66a)!
 
 [![Test build](https://github.com/Card-Forge/forge/actions/workflows/test-build.yaml/badge.svg)](https://github.com/Card-Forge/forge/actions/workflows/test-build.yaml)
 
+> **Fork note:** this fork adds a browser front end (`forge-gui-web`) alongside the
+> desktop and mobile clients. See [forge-gui-web/README.md](forge-gui-web/README.md),
+> and [AGENTS.md](AGENTS.md) for AI-agent docs.
+
 ---
 
 ## ✨ Introduction

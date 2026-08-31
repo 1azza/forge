@@ -59,6 +59,20 @@ downloaded through Forge, then its own disk cache, then Scryfall (rate-limited a
 cached). Images are served with a long `Cache-Control`, so each printing is fetched once
 per install.
 
+## Match lifecycle
+
+Starting a match ends the previous one. `MatchLauncher` concedes the running game —
+`PlayerControllerHuman.concede()` releases the input latches the parked game thread waits
+on — waits for it to unwind, then calls `endCurrentGame()` and `resetForNewMatch()` on the
+GUI thread. The finished game's view stays in place: clearing it makes the old thread NPE
+in `awaitNextInput`, and `startMatch` swaps the view anyway.
+
+The engine cannot end a game before the first turn begins (coin toss, opening-hand
+prompts) — the desktop client refuses the same concede, so the client disables
+concede/leave until `turn > 0`. `GameView.isMulligan()` is not usable as that signal: it
+is only true during the London return-cards step, never during the initial keep/mulligan
+prompt.
+
 ## What's implemented
 
 Constructed games against the AI: mulligans, priority, playing lands and spells, paying
