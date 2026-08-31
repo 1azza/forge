@@ -43,6 +43,15 @@ const state = {
   gameOver: false,
 };
 
+// LAN multiplayer identity. The token is a capability secret issued by the server on
+// claim; it lives in localStorage so a refresh can reconnect to the same seat.
+const lan = {
+  token: localStorage.getItem('forge.lan.token') || null,
+  role: null,       // 'HOST' | 'OPPONENT' | null (null while solo)
+  room: null,       // last lobby snapshot
+};
+const savedDecks = [];
+
 let socket = null;
 let reconnectDelay = 500;
 // The server keeps pushing the last game's board after it ends, so which screen we're on
@@ -62,6 +71,8 @@ let lastBannerAt = 0;
 let pendingLocalResolve = null;
 // Previous mana pool, so fresh mana can pulse.
 let lastPool = {};
+// Native drag-and-drop is used for desktop and keeps the existing click action intact.
+let suppressNextCardClick = false;
 
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -110,6 +121,8 @@ function connect() {
   socket.onopen = () => {
     reconnectDelay = 500;
     $('connection').hidden = true;
+    // Hello handshake establishes seat identity: no token means the solo session.
+    send({ t: 'hello', token: lan.token || null });
   };
   socket.onclose = () => {
     $('connection').hidden = false;
@@ -133,6 +146,16 @@ function send(msg) {
   }
 }
 
+// The server binds a socket on its first hello frame, so a change of seat identity
+// (claim or reconnect) needs a fresh connection rather than a second hello.
+function restartSocket() {
+  if (socket) {
+    socket.onclose = null;
+    socket.close();
+  }
+  connect();
+}
+
 const action = (name, extra = {}) => send({ t: 'action', action: name, ...extra });
 
 function handle(msg) {
@@ -143,6 +166,8 @@ function handle(msg) {
     case 'flash': flashPrompt(); break;
     case 'alert': flashPrompt(); break;
     case 'gameOver': break;
+    case 'welcome': onWelcome(msg); break;
+    case 'room': onRoom(msg); break;
     default: break;
   }
 }
@@ -234,7 +259,7 @@ function maybePhaseBanner() {
 function showTable() {
   onSetupScreen = false;
   holdSetupScreen = false;
-  $('setup').hidden = true;
+  hideAllScreens();
   $('table').hidden = false;
   const button = $('start');
   button.disabled = false;
@@ -242,16 +267,51 @@ function showTable() {
 }
 
 function showSetup() {
+  showSoloSetup();
+}
+
+function showSoloSetup() {
   onSetupScreen = true;
   holdSetupScreen = true;
   gameOverDismissed = false;
   $('gameover').hidden = true;
-  $('table').hidden = true;
+  hideAllScreens();
   $('setup').hidden = false;
   $('setup-error').hidden = true;
   const button = $('start');
   button.disabled = false;
   button.textContent = 'Start game';
+}
+
+function showMode() {
+  onSetupScreen = true;
+  holdSetupScreen = true;
+  hideAllScreens();
+  $('mode').hidden = false;
+}
+
+function showLanLobby() {
+  onSetupScreen = true;
+  holdSetupScreen = true;
+  gameOverDismissed = false;
+  hideAllScreens();
+  $('lan').hidden = false;
+  setLanError('');
+  if (lan.token && lan.role) {
+    $('lan-join').hidden = true;
+    $('lan-lobby').hidden = false;
+  } else {
+    $('lan-join').hidden = false;
+    $('lan-lobby').hidden = true;
+  }
+  if (lan.room) renderLanRoom(lan.room);
+}
+
+function hideAllScreens() {
+  $('mode').hidden = true;
+  $('setup').hidden = true;
+  $('lan').hidden = true;
+  $('table').hidden = true;
 }
 
 const me = () => state.players.find((p) => p.id === state.me) || state.players.find((p) => p.local);
@@ -568,6 +628,7 @@ function rank(id) {
 function drawHand(player) {
   const el = $('hand');
   syncCards(el, (player && player.handCards) || []);
+  [...el.children].forEach(enableCardDrag);
   // Arc fan: rotate around a pivot below the hand, sink the outer cards, and tighten
   // the overlap as the hand grows. Leave-ghosts are excluded: they keep the pose they
   // froze in and shouldn't re-space the living cards.
@@ -580,6 +641,43 @@ function drawHand(player) {
     node.style.setProperty('--lift', `${Math.abs(off) * Math.abs(off) * 1.15}px`);
     node.style.setProperty('--overlap', overlap);
   });
+}
+
+function enableCardDrag(cardEl) {
+  if (cardEl.dataset.dragReady) return;
+  cardEl.dataset.dragReady = 'true';
+  cardEl.draggable = true;
+  cardEl.ondragstart = (e) => {
+    suppressNextCardClick = true;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', cardEl.dataset.id);
+    cardEl.classList.add('dragging');
+    $('seat-me').classList.add('drag-active');
+  };
+  cardEl.ondragend = () => {
+    cardEl.classList.remove('dragging');
+    $('seat-me').classList.remove('drag-active', 'drag-over');
+    // Browsers dispatch click after dragend. Do not select the card a second time.
+    setTimeout(() => { suppressNextCardClick = false; }, 0);
+  };
+}
+
+function setupUserSideDrop() {
+  const zone = $('seat-me');
+  zone.ondragover = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    zone.classList.add('drag-over');
+  };
+  zone.ondragleave = (e) => {
+    if (!e.relatedTarget || !zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
+  };
+  zone.ondrop = (e) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    zone.classList.remove('drag-over');
+    if (id && state.cards.has(Number(id))) action('card', { id: Number(id) });
+  };
 }
 
 // Reuses existing card nodes where possible; only re-renders a card whose data changed.
@@ -725,7 +823,10 @@ function renderCard(card, reuse) {
     el.append(pt);
   }
 
-  el.onclick = () => action('card', { id: card.id });
+  el.onclick = () => {
+    if (suppressNextCardClick) return;
+    action('card', { id: card.id });
+  };
   el.onkeydown = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -1230,11 +1331,298 @@ function escapeHtml(text) {
   ));
 }
 
+// ------------------------------------------------------------------ LAN lobby
+
+function onWelcome(msg) {
+  if (msg.mode === 'solo') {
+    lan.role = null;
+    return;
+  }
+  lan.role = msg.role || lan.role;
+}
+
+function onRoom(msg) {
+  lan.room = msg;
+  if (msg.you) lan.role = msg.you;
+
+  if (msg.state === 'STARTING' || msg.state === 'PLAYING') {
+    // The match is about to start or is running: drop the lobby hold so the first state
+    // push opens the table for every seat (not just the host who pressed Start).
+    holdSetupScreen = false;
+    gameOverDismissed = false;
+  } else if (msg.state === 'WAITING' && !onSetupScreen && lan.token) {
+    // A room reset to the lobby while we're still on the table means the match ended
+    // (someone left or a seat expired); come back to the lobby.
+    showLanLobby();
+  }
+
+  // If the server released our seat underneath us (opponent left the lobby, or an
+  // in-game expiry cleared both seats), drop our now-invalid identity and offer to
+  // rejoin rather than stranding us in an empty lobby.
+  const mySeat = (msg.seats || []).find((s) => s.role === lan.role);
+  if (lan.token && lan.role && (!mySeat || !mySeat.name)) {
+    localStorage.removeItem('forge.lan.token');
+    lan.token = null;
+    lan.role = null;
+    lan.room = null;
+    if (!$('lan').hidden) {
+      setLanError('Your seat was released. Join again to continue.');
+      showLanLobby();
+    }
+  }
+
+  if (!$('lan').hidden) renderLanRoom(msg);
+}
+
+function setLanError(text) {
+  const el = $('lan-error');
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
+function lanErrorText(code) {
+  return {
+    ROOM_FULL: 'The room is full.',
+    INVALID_TOKEN: 'Your seat is no longer valid. Rejoin the room.',
+    NOT_HOST: 'Only the host can do that.',
+    NOT_LOBBY: 'The match has already started.',
+    ALREADY_STARTED: 'A match is already in progress.',
+    MATCH_FINISHED: 'That match is over. Leave the room to set up a new one.',
+    WAITING_FOR_PLAYER: 'Waiting for an opponent to join.',
+    NOT_READY: 'Both players must ready up first.',
+    PLAYER_DISCONNECTED: 'The opponent is disconnected.',
+    MISSING_DECKS: 'Both players must choose a deck.',
+    UNKNOWN_DECK: 'Choose a valid deck.',
+  }[code] || code || 'Something went wrong.';
+}
+
+async function lanPost(path, body) {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return await response.json();
+}
+
+async function tryReconnectLan() {
+  if (!lan.token) return false;
+  try {
+    const r = await lanPost('/api/lan/reconnect', { token: lan.token });
+    if (r.ok) {
+      lan.role = r.role;
+      if (r.room) {
+        lan.room = r.room;
+        renderLanRoom(r.room);
+      }
+      showLanLobby();
+      return true;
+    }
+  } catch (e) {
+    // fall through and clear the stale token
+  }
+  localStorage.removeItem('forge.lan.token');
+  lan.token = null;
+  lan.role = null;
+  lan.room = null;
+  return false;
+}
+
+async function joinLan() {
+  const name = ($('lan-name').value || '').trim() || 'Player';
+  setLanError('');
+  try {
+    const r = await lanPost('/api/lan/claim', { name });
+    if (!r.ok) {
+      setLanError(lanErrorText(r.error));
+      return;
+    }
+    lan.token = r.token;
+    lan.role = r.role;
+    localStorage.setItem('forge.lan.token', r.token);
+    if (r.room) {
+      lan.room = r.room;
+      renderLanRoom(r.room);
+    }
+    showLanLobby();
+    restartSocket(); // rebind the socket to this seat
+  } catch (e) {
+    setLanError('Could not reach the server.');
+  }
+}
+
+function leaveLan() {
+  if (!lan.token) return;
+  lanPost('/api/lan/leave', { token: lan.token }).then((r) => {
+    localStorage.removeItem('forge.lan.token');
+    lan.token = null;
+    lan.role = null;
+    lan.room = null;
+    restartSocket(); // rebind back to the solo session
+    showMode();
+  });
+}
+
+function leaveTable() {
+  if (lan.token) {
+    // Back to the LAN lobby; if a match is live or finished the server tears it down
+    // and keeps both seats so the pair can rematch.
+    lanPost('/api/lan/leave', { token: lan.token }).then((r) => {
+      if (r.ok) showLanLobby();
+    });
+  } else {
+    showSetup();
+  }
+}
+
+function startLan() {
+  if (!lan.token) return;
+  setLanError('');
+  lanPost('/api/lan/start', { token: lan.token }).then((r) => {
+    if (!r.ok) {
+      setLanError(lanErrorText(r.error));
+      return;
+    }
+    // The table appears on the first state push from the new match.
+    holdSetupScreen = false;
+    gameOverDismissed = false;
+  });
+}
+
+function renderLanRoom(room) {
+  const seatsEl = $('lan-seats');
+  seatsEl.replaceChildren(...(room.seats || []).map((seat) => renderLanSeat(seat)));
+  renderLanControls(room);
+}
+
+function renderLanSeat(seat) {
+  const div = document.createElement('div');
+  div.className = 'lan-seat'
+    + (seat.role === lan.role ? ' mine' : '')
+    + (seat.ready ? ' ready' : '')
+    + (!seat.connected ? ' offline' : '');
+
+  const head = document.createElement('div');
+  head.className = 'lan-seat-head';
+  const role = document.createElement('span');
+  role.className = 'lan-seat-role';
+  role.textContent = seat.role === 'HOST' ? 'Host' : 'Opponent';
+  const status = document.createElement('span');
+  status.className = 'lan-seat-status';
+  if (!seat.name) {
+    status.textContent = 'Open';
+  } else if (!seat.connected) {
+    status.textContent = 'Reconnecting…';
+  } else {
+    status.textContent = seat.ready ? 'Ready' : 'Not ready';
+  }
+  head.append(role, status);
+  div.append(head);
+
+  const name = document.createElement('div');
+  name.className = 'lan-seat-name';
+  name.textContent = seat.name || '—';
+  div.append(name);
+
+  if (seat.name && seat.deck) {
+    const deck = document.createElement('div');
+    deck.className = 'lan-seat-deck';
+    deck.textContent = seat.deck === 'random' ? 'Random deck' : seat.deck;
+    div.append(deck);
+  }
+  return div;
+}
+
+let lanControlsSig = '';
+function renderLanControls(room) {
+  const mySeat = (room.seats || []).find((s) => s.role === lan.role);
+  if (!mySeat) return;
+  const sig = JSON.stringify({ me: mySeat, life: room.startingLife, state: room.state });
+  if (sig === lanControlsSig) return;
+  lanControlsSig = sig;
+
+  const controls = $('lan-controls');
+  controls.replaceChildren();
+
+  const nameRow = lanField('Your name');
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.maxLength = 32;
+  nameInput.value = mySeat.name || '';
+  nameInput.onchange = () => lanPost('/api/lan/name', { token: lan.token, name: nameInput.value.trim() });
+  nameRow.append(nameInput);
+  controls.append(nameRow);
+
+  const deckRow = lanField('Your deck');
+  const deckSelect = document.createElement('select');
+  deckSelect.append(lanOption('random', 'Random two-colour deck'));
+  for (const name of savedDecks) deckSelect.append(lanOption(name, name));
+  deckSelect.value = mySeat.deck || 'random';
+  deckSelect.onchange = () => lanPost('/api/lan/deck', { token: lan.token, deck: deckSelect.value });
+  deckRow.append(deckSelect);
+  controls.append(deckRow);
+
+  if (lan.role === 'HOST') {
+    const lifeRow = lanField('Starting life');
+    const lifeInput = document.createElement('input');
+    lifeInput.type = 'number';
+    lifeInput.min = 1;
+    lifeInput.max = 100;
+    lifeInput.value = room.startingLife ?? 20;
+    lifeInput.onchange = () => lanPost('/api/lan/rule', { token: lan.token, startingLife: Number(lifeInput.value) || 20 });
+    lifeRow.append(lifeInput);
+    controls.append(lifeRow);
+  }
+
+  const buttons = document.createElement('div');
+  buttons.className = 'lan-actions';
+
+  const readyBtn = document.createElement('button');
+  readyBtn.className = mySeat.ready ? 'secondary' : 'primary';
+  readyBtn.textContent = mySeat.ready ? 'Not ready' : 'Ready';
+  readyBtn.onclick = () => lanPost('/api/lan/ready', { token: lan.token, ready: !mySeat.ready });
+  buttons.append(readyBtn);
+
+  if (lan.role === 'HOST') {
+    const startBtn = document.createElement('button');
+    startBtn.className = 'primary';
+    startBtn.textContent = 'Start match';
+    startBtn.onclick = startLan;
+    buttons.append(startBtn);
+  }
+
+  const leaveBtn = document.createElement('button');
+  leaveBtn.className = 'ghost danger';
+  leaveBtn.textContent = 'Leave room';
+  leaveBtn.onclick = leaveLan;
+  buttons.append(leaveBtn);
+
+  controls.append(buttons);
+}
+
+function lanField(label) {
+  const row = document.createElement('div');
+  row.className = 'lan-field';
+  const lbl = document.createElement('label');
+  lbl.textContent = label;
+  row.append(lbl);
+  return row;
+}
+
+function lanOption(value, text) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  return o;
+}
+
 // ---------------------------------------------------------------------- setup
 
 async function loadDecks() {
   try {
     const decks = await (await fetch('/api/decks')).json();
+    savedDecks.length = 0;
+    savedDecks.push(...decks);
     for (const id of ['deck', 'opponent-deck']) {
       const select = $(id);
       for (const name of decks) {
@@ -1297,10 +1685,10 @@ $('btn-new').onclick = async () => {
   }
   if (state.gameOver
       || await localConfirm('New game', 'Leave this game and set up a new one?', 'Leave game')) {
-    showSetup();
+    leaveTable();
   }
 };
-$('btn-gameover-new').onclick = showSetup;
+$('btn-gameover-new').onclick = leaveTable;
 $('btn-review').onclick = () => {
   gameOverDismissed = true;
   render();
@@ -1320,8 +1708,10 @@ $('modal-backdrop').onclick = (e) => {
   }
 };
 
+setupUserSideDrop();
+
 document.addEventListener('keydown', (e) => {
-  if (dialogRid !== null || $('setup').hidden === false) return;
+  if (dialogRid !== null || onSetupScreen) return;
   if (e.key === ' ' || e.key === 'Enter') {
     if (!$('btn-ok').disabled) { e.preventDefault(); action('ok'); }
   } else if (e.key === 'Escape') {
@@ -1367,5 +1757,27 @@ if (matchMedia('(hover: hover) and (pointer: fine)').matches
   }
 }
 
-loadDecks();
-connect();
+async function init() {
+  await loadDecks();
+
+  $('mode-solo').onclick = showSoloSetup;
+  $('mode-lan').onclick = showLanLobby;
+  $('btn-back').onclick = showMode;
+  $('lan-back').onclick = () => {
+    if (lan.token) leaveLan();
+    else showMode();
+  };
+  $('lan-join-btn').onclick = joinLan;
+  $('lan-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') joinLan();
+  });
+
+  // A surviving token means this browser owned a seat; reconnect straight into the lobby.
+  if (lan.token) {
+    const ok = await tryReconnectLan();
+    if (ok) return;
+  }
+  showMode();
+}
+
+init().then(connect);

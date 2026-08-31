@@ -18,7 +18,7 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.stream.ChunkedWriteHandler;
 
-import forge.web.WebSession;
+import forge.web.LanRoomManager;
 
 /** Netty HTTP server that also carries the game socket on {@code /ws}. */
 public class WebServer {
@@ -28,15 +28,15 @@ public class WebServer {
     private static final int MAX_CONTENT_LENGTH = 1024 * 1024;
 
     private final int port;
-    private final WebSession session;
+    private final LanRoomManager manager;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private Channel channel;
 
-    public WebServer(final int port, final WebSession session) {
+    public WebServer(final int port, final LanRoomManager manager) {
         this.port = port;
-        this.session = session;
+        this.manager = manager;
     }
 
     public void start() throws InterruptedException {
@@ -57,7 +57,7 @@ public class WebServer {
                         pipeline.addLast(new ChunkedWriteHandler());
                         // Passes non-websocket requests through to the HTTP handler below.
                         pipeline.addLast(new WebSocketServerProtocolHandler(WEBSOCKET_PATH, null, true));
-                        pipeline.addLast(new RequestHandler(session));
+                        pipeline.addLast(new RequestHandler(manager));
                     }
                 });
 
