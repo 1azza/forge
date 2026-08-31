@@ -10,6 +10,24 @@ const PHASES = [
   'COMBAT_END', 'MAIN2', 'END_OF_TURN', 'CLEANUP',
 ];
 
+// The thirteen steps group into the four landmarks players think in.
+const PHASE_GROUPS = [
+  { label: 'First main', phases: ['UNTAP', 'UPKEEP', 'DRAW', 'MAIN1'] },
+  { label: 'Combat', phases: ['COMBAT_BEGIN', 'COMBAT_DECLARE_ATTACKERS', 'COMBAT_DECLARE_BLOCKERS', 'COMBAT_FIRST_STRIKE_DAMAGE', 'COMBAT_DAMAGE', 'COMBAT_END'] },
+  { label: 'Second main', phases: ['MAIN2'] },
+  { label: 'End step', phases: ['END_OF_TURN', 'CLEANUP'] },
+];
+
+// Human names for the phase banner.
+const PHASE_NAMES = {
+  UNTAP: 'Untap', UPKEEP: 'Upkeep', DRAW: 'Draw',
+  MAIN1: 'First main phase', MAIN2: 'Second main phase',
+  COMBAT_BEGIN: 'Combat begins', COMBAT_DECLARE_ATTACKERS: 'Declare attackers',
+  COMBAT_DECLARE_BLOCKERS: 'Declare blockers', COMBAT_FIRST_STRIKE_DAMAGE: 'First strike damage',
+  COMBAT_DAMAGE: 'Combat damage', COMBAT_END: 'End of combat',
+  END_OF_TURN: 'End step', CLEANUP: 'Cleanup',
+};
+
 const state = {
   cards: new Map(),
   players: [],
@@ -34,8 +52,41 @@ let onSetupScreen = true;
 // push for the old game doesn't yank them onto the table again.
 let holdSetupScreen = false;
 let gameOverDismissed = false;
+// Guard for the one-shot turn banner: turn+player the banner last fired for.
+let lastTurnKey = null;
+// Guards for the phase ribbon: last phase seen, and when the last banner (either kind)
+// fired, so a turn change and a phase change never stamp on each other.
+let lastPhaseKey = null;
+let lastBannerAt = 0;
+// Resolver of the currently open client-side confirm (zone views answer nothing).
+let pendingLocalResolve = null;
+// Previous mana pool, so fresh mana can pulse.
+let lastPool = {};
 
 const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+/**
+ * Applies a transient animation class and removes it after {@code ms}, unconditionally.
+ * Cleanup by animationend alone is not safe: a background tab suspends CSS animations,
+ * and a paused animation still overrides computed styles — the element would sit at its
+ * first keyframe (opacity 0) for as long as the tab stays hidden.
+ */
+function flashClass(el, cls, ms) {
+  if (document.hidden) return;
+  el.classList.add(cls);
+  setTimeout(() => el.classList.remove(cls), ms);
+}
+
+// Surface uncaught errors visibly: a frozen board with a silent console is the worst
+// failure mode for a remote-debugged client. Persistent until the next error so a
+// snapshot catches it.
+window.addEventListener('error', (e) => {
+  const bar = $('connection');
+  bar.textContent = `Client error: ${e.message}`;
+  bar.hidden = false;
+  console.error(e.error || e.message);
+});
 
 // --------------------------------------------------------------------- socket
 
@@ -117,7 +168,54 @@ function applyState(msg) {
   if (onSetupScreen && state.players.length && !holdSetupScreen) {
     showTable();
   }
+  const turnKey = `${state.turn}:${state.turnPlayer}`;
+  if (!onSetupScreen && !state.gameOver && state.turn > 0 && turnKey !== lastTurnKey) {
+    showTurnBanner();
+  }
+  lastTurnKey = turnKey;
+  maybePhaseBanner();
   render();
+}
+
+/** One-shot sweep when the turn changes to another player (or back). */
+function showTurnBanner() {
+  const banner = $('turn-banner');
+  const mine = state.turnPlayer === state.me;
+  const player = state.players.find((p) => p.id === state.turnPlayer);
+  banner.querySelector('span').textContent = mine ? 'Your turn' : `${player ? player.name : 'Opponent'}'s turn`;
+  banner.className = 'turn-banner' + (mine ? ' mine' : '');
+  banner.hidden = false;
+  // Restart the CSS animation on repeat turns within the same page load.
+  const label = banner.querySelector('span');
+  label.style.animation = 'none';
+  void label.offsetWidth;
+  label.style.animation = '';
+  clearTimeout(showTurnBanner.timer);
+  showTurnBanner.timer = setTimeout(() => { banner.hidden = true; }, 1600);
+  // The turn change already told the player where they are; don't stack a phase
+  // banner on top of it in the same breath.
+  lastBannerAt = Date.now();
+}
+
+/** Brief ribbon whenever the game steps to a new phase. Skipped right after a turn
+ *  banner so the two never stamp on each other. */
+function maybePhaseBanner() {
+  const key = state.phaseId;
+  if (!key || key === lastPhaseKey) return;
+  const first = lastPhaseKey === null;
+  lastPhaseKey = key;
+  if (first || onSetupScreen || state.gameOver || Date.now() - lastBannerAt < 2600) return;
+  const banner = $('phase-banner');
+  const combat = key.startsWith('COMBAT');
+  banner.querySelector('span').textContent = PHASE_NAMES[key] || key.replace(/_/g, ' ').toLowerCase();
+  banner.className = 'phase-banner' + (combat ? ' combat' : '');
+  banner.hidden = false;
+  const label = banner.querySelector('span');
+  label.style.animation = 'none';
+  void label.offsetWidth;
+  label.style.animation = '';
+  clearTimeout(maybePhaseBanner.timer);
+  maybePhaseBanner.timer = setTimeout(() => { banner.hidden = true; }, 1450);
 }
 
 function showTable() {
@@ -170,6 +268,36 @@ function draw() {
   $('btn-concede').disabled = isGameStarting();
   drawPhaseTrack();
 
+  // Whose turn: gild the active seat, dim the other, and keep a permanent answer in
+  // the topbar. Combat mode warms the whole room.
+  const theirId = them && them.id;
+  const myId = mine && mine.id;
+  const live = !state.gameOver && !onSetupScreen;
+  const mineTurn = live && state.turnPlayer === myId;
+  const theirsTurn = live && state.turnPlayer === theirId;
+  $('seat-me').classList.toggle('turn', mineTurn);
+  $('seat-opponent').classList.toggle('turn', theirsTurn);
+  $('bf-me').classList.toggle('turn-active', mineTurn);
+  $('bf-opponent').classList.toggle('turn-active', theirsTurn);
+  $('player-bar-me').classList.toggle('turn-active', mineTurn);
+  $('player-bar-opponent').classList.toggle('turn-active', theirsTurn);
+
+  const owner = $('turn-owner');
+  if (!live) {
+    owner.textContent = '';
+    owner.className = 'turn-owner';
+  } else if (mineTurn) {
+    owner.textContent = 'Your turn';
+    owner.className = 'turn-owner mine';
+  } else {
+    owner.textContent = `${them ? them.name : 'Opponent'}'s turn`;
+    owner.className = 'turn-owner theirs';
+  }
+
+  const inCombat = (state.phaseId || '').startsWith('COMBAT')
+    || (Array.isArray(state.combat && state.combat.bands) && state.combat.bands.length > 0);
+  document.body.classList.toggle('combat', live && inCombat);
+
   if (them) drawPlayerBar($('player-bar-opponent'), them);
   if (mine) drawPlayerBar($('player-bar-me'), mine);
 
@@ -182,14 +310,82 @@ function draw() {
   drawManaPool(mine);
   drawLog();
   drawGameOver(mine);
+  // Arrows need final card positions, which only exist after layout.
+  requestAnimationFrame(drawCombatArrows);
+}
+
+/**
+ * Attack lines drawn between where the cards actually are: attacker card to the first
+ * blocker, or to the defending player's bar for unblocked attacks. Redrawn on every
+ * paint while combat exists; empty otherwise.
+ */
+function drawCombatArrows() {
+  const svg = $('combat-svg');
+  const bands = (state.combat && state.combat.bands) || [];
+  if (!bands.length || onSetupScreen) {
+    svg.replaceChildren();
+    return;
+  }
+  const board = svg.parentElement.getBoundingClientRect();
+  const ns = 'http://www.w3.org/2000/svg';
+  const frag = document.createDocumentFragment();
+
+  for (const band of bands) {
+    const from = cardAnchor(band.attacker, 'top', board);
+    if (!from) continue;
+    let to = null;
+    const blockers = band.blockers || [];
+    for (const id of blockers) {
+      to = cardAnchor(id, 'bottom', board);
+      if (to) break;
+    }
+    if (!to && band.defender != null) {
+      const bar = document.getElementById(band.defender === state.me ? 'player-bar-me' : 'player-bar-opponent');
+      if (bar) {
+        const r = bar.getBoundingClientRect();
+        to = { x: r.left + r.width / 2 - board.left, y: r.top + r.height / 2 - board.top };
+      }
+    }
+    if (!to) continue;
+
+    // A gentle quadratic bow above the straight line; the sag scales with distance.
+    const cx = (from.x + to.x) / 2;
+    const cy = Math.min(from.y, to.y) - Math.abs(to.x - from.x) * 0.10 - 16;
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`);
+    path.setAttribute('class', blockers.length ? 'arrow blocked' : 'arrow attack');
+    frag.append(path);
+
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', to.x);
+    dot.setAttribute('cy', to.y);
+    dot.setAttribute('r', 3.5);
+    dot.setAttribute('class', (blockers.length ? 'arrow blocked' : 'arrow attack') + ' tip');
+    frag.append(dot);
+  }
+  svg.replaceChildren(frag);
+}
+
+function cardAnchor(id, edge, board) {
+  const el = document.querySelector(`.battlefield .card[data-id="${id}"]`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return {
+    x: r.left + r.width / 2 - board.left,
+    y: (edge === 'top' ? r.top : r.bottom) - board.top,
+  };
 }
 
 function drawGameOver(mine) {
   const show = state.gameOver && !gameOverDismissed && !onSetupScreen;
-  $('gameover').hidden = !show;
+  const overlay = $('gameover');
+  overlay.hidden = !show;
   if (!show) return;
   const won = mine && state.winner === mine.name;
-  $('gameover-title').textContent = state.winner ? (won ? 'You win' : 'You lose') : 'Game over';
+  const title = $('gameover-title');
+  title.textContent = state.winner ? (won ? 'You win' : 'You lose') : 'Game over';
+  title.className = won ? 'win' : 'lose';
+  overlay.className = 'gameover' + (won ? ' win' : ' lose');
   $('gameover-detail').textContent = state.winner
     ? `${state.winner} wins on turn ${state.turn}.`
     : `The game ended on turn ${state.turn}.`;
@@ -197,16 +393,31 @@ function drawGameOver(mine) {
 
 function drawPhaseTrack() {
   const track = $('phase-track');
-  const current = PHASES.indexOf(state.phaseId);
-  if (track.childElementCount !== PHASES.length) {
-    track.replaceChildren(...PHASES.map((p) => {
-      const li = document.createElement('li');
-      li.title = p.replace(/_/g, ' ').toLowerCase();
-      return li;
+  if (track.childElementCount !== PHASE_GROUPS.length) {
+    track.replaceChildren(...PHASE_GROUPS.map((group) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'phase-group';
+      const segments = document.createElement('ol');
+      segments.className = 'segments';
+      segments.replaceChildren(...group.phases.map(() => document.createElement('li')));
+      const label = document.createElement('span');
+      label.className = 'glabel';
+      label.textContent = group.label;
+      wrap.append(segments, label);
+      return wrap;
     }));
   }
-  [...track.children].forEach((li, i) => {
-    li.className = i === current ? 'now' : (current >= 0 && i < current ? 'done' : '');
+  const current = PHASES.indexOf(state.phaseId);
+  let seen = 0;
+  [...track.children].forEach((groupEl, g) => {
+    const group = PHASE_GROUPS[g];
+    const active = current >= seen && current < seen + group.phases.length;
+    groupEl.classList.toggle('hot', active);
+    const segIndex = current - seen;
+    [...groupEl.querySelector('.segments').children].forEach((li, i) => {
+      li.className = i === segIndex ? 'now' : (current >= 0 && i < segIndex ? 'done' : '');
+    });
+    seen += group.phases.length;
   });
 }
 
@@ -224,13 +435,34 @@ function drawPlayerBar(el, player) {
     ['Exile', (player.exile || []).length, () => showZone(`${player.name} — exile`, player.exile)],
   ];
 
+  // Rebuilt each draw (a handful of nodes). The life flash animates exactly when the
+  // life value differs from the last paint, because the fresh node carries the class
+  // only then — no need to track or cancel animation state.
+  const dropped = el.dataset.life !== undefined && Number(el.dataset.life) > player.life;
+  const rose = el.dataset.life !== undefined && Number(el.dataset.life) < player.life;
+
   el.replaceChildren();
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = (player.name || '?').charAt(0).toUpperCase();
+
+  const life = document.createElement('span');
+  life.className = 'life'
+    + (player.life <= 5 ? ' low' : '')
+    + (dropped ? ' dropped' : rose ? ' rose' : '');
+  life.textContent = player.life;
+
+  const who = document.createElement('div');
+  who.className = 'who';
   const name = document.createElement('span');
   name.className = 'name';
-  name.textContent = player.name + (player.ai ? ' (AI)' : '');
-  const life = document.createElement('span');
-  life.className = 'life' + (player.life <= 5 ? ' low' : '');
-  life.textContent = player.life;
+  name.textContent = player.name;
+  const subtitle = document.createElement('span');
+  subtitle.className = 'subtitle';
+  subtitle.textContent = player.ai ? 'AI opponent' : 'You';
+  who.append(name, subtitle);
+
   const zoneWrap = document.createElement('div');
   zoneWrap.className = 'zones';
   for (const [label, count, onClick] of zones) {
@@ -242,7 +474,9 @@ function drawPlayerBar(el, player) {
     }
     zoneWrap.append(chip);
   }
-  el.append(life, name, zoneWrap);
+
+  el.append(avatar, life, who, zoneWrap);
+  el.dataset.life = player.life;
 
   for (const [type, n] of Object.entries(player.counters || {})) {
     const badge = document.createElement('span');
@@ -255,11 +489,15 @@ function drawPlayerBar(el, player) {
 function drawBattlefield(el, player) {
   if (!player) {
     el.replaceChildren();
+    el.classList.remove('dense');
     return;
   }
   // Lands to the back, creatures to the front, so the board reads at a glance.
   const ids = (player.bf || []).slice().sort((a, b) => rank(a) - rank(b));
   syncCards(el, ids);
+  // Once the row overflows, overlap cards like a held fan instead of wrapping into a
+  // scrolling second row where half the board hides behind a scrollbar.
+  el.classList.toggle('dense', el.childElementCount > 14);
 }
 
 function rank(id) {
@@ -273,10 +511,23 @@ function rank(id) {
 }
 
 function drawHand(player) {
-  syncCards($('hand'), (player && player.handCards) || []);
+  const el = $('hand');
+  syncCards(el, (player && player.handCards) || []);
+  // Arc fan: rotate around a pivot below the hand, sink the outer cards, and tighten
+  // the overlap as the hand grows.
+  const n = el.childElementCount;
+  const overlap = n > 9 ? -0.34 : n > 6 ? -0.18 : 0;
+  [...el.children].forEach((node, i) => {
+    const off = i - (n - 1) / 2;
+    node.style.setProperty('--rot', `${clamp(off * 2.4, -13, 13)}deg`);
+    node.style.setProperty('--lift', `${Math.abs(off) * Math.abs(off) * 1.15}px`);
+    node.style.setProperty('--overlap', overlap);
+  });
 }
 
 // Reuses existing card nodes where possible; only re-renders a card whose data changed.
+// Brand-new nodes get an arrival animation — drawn from below in hand, summoned with a
+// gold impact ring on the battlefield — and cards whose damage went up flash once.
 function syncCards(container, ids) {
   const existing = new Map();
   for (const node of container.children) {
@@ -288,12 +539,20 @@ function syncCards(container, ids) {
     if (!card) continue;
     let node = existing.get(id);
     const signature = JSON.stringify(card);
+    const prevDamage = node ? Number(node.dataset.dmg || 0) : 0;
     if (node && node.dataset.sig === signature) {
       existing.delete(id);
     } else {
+      const isNew = !node;
       node = renderCard(card, node);
       node.dataset.sig = signature;
       existing.delete(id);
+      if (isNew) {
+        flashClass(node, container.id === 'hand' ? 'entering-hand' : 'entering-bf', 650);
+      }
+    }
+    if ((card.damage || 0) > prevDamage) {
+      flashClass(node, 'hit', 650);
     }
     nodes.push(node);
   }
@@ -308,6 +567,7 @@ function syncCards(container, ids) {
 function renderCard(card, reuse) {
   const el = reuse || document.createElement('div');
   el.dataset.id = card.id;
+  el.dataset.dmg = card.damage || 0;
   // Cards are the primary control surface, so give them a real role and keyboard focus
   // rather than leaving them as click-only divs.
   el.setAttribute('role', 'button');
@@ -418,10 +678,25 @@ function drawStack() {
   el.replaceChildren(...state.stack.map((item) => {
     const div = document.createElement('div');
     div.className = 'stack-item' + (item.trigger ? ' trigger' : '');
-    div.innerHTML = `<span class="src">${escapeHtml(item.srcName || '')}</span>`
-      + `<span class="txt">${escapeHtml(item.text || '')}</span>`;
+    // A thumbnail beats a name: the spell is recognisable at a glance.
+    const card = state.cards.get(item.src);
+    if (card && !card.hidden) {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.alt = '';
+      img.src = imageUrl(card);
+      img.onerror = () => img.remove();
+      div.append(img);
+    }
+    const src = document.createElement('span');
+    src.className = 'src';
+    src.textContent = item.srcName || '';
+    const txt = document.createElement('span');
+    txt.className = 'txt';
+    txt.textContent = item.text || '';
+    div.append(src, txt);
     div.onmouseenter = () => {
-      const card = state.cards.get(item.src);
       if (card) inspect(card);
     };
     div.onmouseleave = hideInspector;
@@ -450,6 +725,14 @@ function drawPrompt() {
   const message = $('prompt-message');
   const ok = $('btn-ok');
   const cancel = $('btn-cancel');
+  const bar = $('prompt');
+
+  // The left edge of the prompt bar is the at-a-glance priority signal: lit when the
+  // engine is waiting on you, dark while you wait on it.
+  bar.className = 'prompt' + (prompt && prompt.okEnabled && !state.gameOver ? ' active' : '');
+  $('prompt-state').textContent = state.gameOver
+    ? 'Game over'
+    : (prompt && prompt.okEnabled ? 'Your move' : 'Waiting');
 
   if (state.gameOver) {
     message.textContent = state.winner ? `${state.winner} wins.` : 'Game over.';
@@ -471,8 +754,11 @@ function drawManaPool(player) {
     div.textContent = n;
     div.title = `Spend ${color} mana`;
     div.onclick = () => action('mana', { color });
+    // Fresh mana chimes in so you notice the pool grew (visible tabs only — see syncCards).
+    if (n > (lastPool[color] || 0)) flashClass(div, 'gained', 450);
     return div;
   }));
+  lastPool = { ...pool };
 }
 
 function drawLog() {
@@ -727,6 +1013,7 @@ function buildAmounts(msg, body, buttons) {
 function localConfirm(title, message, confirmLabel) {
   return new Promise((resolve) => {
     dialogRid = null;
+    pendingLocalResolve = resolve;
     $('modal-title').textContent = title;
     $('modal-message').textContent = message;
     $('modal-body').replaceChildren();
@@ -746,6 +1033,7 @@ function localConfirm(title, message, confirmLabel) {
 
     function finish(result) {
       $('modal-backdrop').hidden = true;
+      pendingLocalResolve = null;
       resolve(result);
     }
   });
@@ -797,7 +1085,10 @@ function toast(message, isError) {
   el.className = 'toast' + (isError ? ' error' : '');
   el.textContent = message;
   $('toasts').append(el);
-  setTimeout(() => el.remove(), 5000);
+  setTimeout(() => {
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 280);
+  }, 4600);
 }
 
 function flashPrompt() {
@@ -898,6 +1189,18 @@ $('btn-review').onclick = () => {
 };
 $('btn-log').onclick = () => { $('logpanel').hidden = false; drawLog(); };
 $('btn-log-close').onclick = () => { $('logpanel').hidden = true; };
+
+// Clicking the dimmed area dismisses client-side dialogs only (zone views and local
+// confirms). Engine dialogs stay up until answered — the game thread is blocked on
+// them, and an accidental click shouldn't answer a choice.
+$('modal-backdrop').onclick = (e) => {
+  if (e.target.id !== 'modal-backdrop' || dialogRid !== null) return;
+  $('modal-backdrop').hidden = true;
+  if (pendingLocalResolve) {
+    pendingLocalResolve(false);
+    pendingLocalResolve = null;
+  }
+};
 
 document.addEventListener('keydown', (e) => {
   if (dialogRid !== null || $('setup').hidden === false) return;

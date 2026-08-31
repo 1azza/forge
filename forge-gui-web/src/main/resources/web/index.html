@@ -4,11 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Forge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 
 <div id="setup" class="setup">
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
   <div class="setup-card">
     <h1>Forge</h1>
     <p class="sub">Magic: The Gathering rules engine</p>
@@ -18,6 +23,7 @@
     <select id="opponent-deck"><option value="random">Random two-colour deck</option></select>
     <button id="start" class="primary">Start game</button>
     <p id="setup-error" class="error" hidden></p>
+    <p class="setup-foot">Unofficial open-source rules engine — not affiliated with Wizards of the Coast</p>
   </div>
 </div>
 
@@ -26,6 +32,7 @@
   <header class="topbar">
     <div class="turn">
       <span id="turn-number">Turn 1</span>
+      <span id="turn-owner" class="turn-owner"></span>
       <span id="phase-name" class="phase-name">Untap</span>
     </div>
     <ol id="phase-track" class="phase-track"></ol>
@@ -37,9 +44,11 @@
   </header>
 
   <section class="board">
-    <div class="seat seat-opponent">
+    <svg id="combat-svg" class="combat-svg" aria-hidden="true"></svg>
+
+    <div class="seat seat-opponent" id="seat-opponent">
       <div class="player-bar" id="player-bar-opponent"></div>
-      <div class="battlefield" id="bf-opponent"></div>
+      <div class="battlefield bf-opponent" id="bf-opponent"></div>
     </div>
 
     <div class="midline">
@@ -47,12 +56,15 @@
       <div class="combat-strip" id="combat-strip"></div>
     </div>
 
-    <div class="seat seat-me">
-      <div class="battlefield" id="bf-me"></div>
+    <div class="seat seat-me" id="seat-me">
+      <div class="battlefield bf-me" id="bf-me"></div>
       <div class="player-bar" id="player-bar-me"></div>
     </div>
 
     <div class="hand" id="hand"></div>
+
+    <div id="turn-banner" class="turn-banner" hidden><span></span></div>
+    <div id="phase-banner" class="phase-banner" hidden><span></span></div>
   </section>
 
   <aside class="inspector" id="inspector" hidden>
@@ -82,6 +94,7 @@
 
   <footer class="prompt" id="prompt">
     <div class="mana-pool" id="mana-pool"></div>
+    <span id="prompt-state" class="prompt-state"></span>
     <p class="prompt-message" id="prompt-message">Waiting…</p>
     <div class="prompt-buttons">
       <button id="btn-ok" class="primary" disabled>OK</button>
