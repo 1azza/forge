@@ -11,7 +11,19 @@
 </head>
 <body>
 
-<div id="setup" class="setup">
+<div id="mode" class="setup">
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="setup-card">
+    <h1>Forge</h1>
+    <p class="sub">Magic: The Gathering rules engine</p>
+    <button id="mode-solo" class="primary">Play vs AI</button>
+    <button id="mode-lan" class="secondary">LAN multiplayer</button>
+    <p class="setup-foot">Unofficial open-source rules engine — not affiliated with Wizards of the Coast</p>
+  </div>
+</div>
+
+<div id="setup" class="setup" hidden>
   <div class="orb orb-a"></div>
   <div class="orb orb-b"></div>
   <div class="setup-card">
@@ -23,6 +35,31 @@
     <select id="opponent-deck"><option value="random">Random two-colour deck</option></select>
     <button id="start" class="primary">Start game</button>
     <p id="setup-error" class="error" hidden></p>
+    <button id="btn-back" class="ghost">Back</button>
+    <p class="setup-foot">Unofficial open-source rules engine — not affiliated with Wizards of the Coast</p>
+  </div>
+</div>
+
+<div id="lan" class="setup" hidden>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="setup-card lan-card">
+    <h1>LAN Match</h1>
+    <p class="sub">Two players, one room on this host</p>
+
+    <div id="lan-join" hidden>
+      <label for="lan-name">Your name</label>
+      <input id="lan-name" type="text" maxlength="32" placeholder="Player">
+      <button id="lan-join-btn" class="primary">Join room</button>
+    </div>
+
+    <div id="lan-lobby" hidden>
+      <div id="lan-seats"></div>
+      <div id="lan-controls"></div>
+    </div>
+
+    <p id="lan-error" class="error" hidden></p>
+    <button id="lan-back" class="ghost">Back</button>
     <p class="setup-foot">Unofficial open-source rules engine — not affiliated with Wizards of the Coast</p>
   </div>
 </div>
@@ -51,12 +88,13 @@
       <div class="battlefield bf-opponent" id="bf-opponent"></div>
     </div>
 
-    <div class="midline">
+    <div class="midline" id="play-area">
       <div class="stack-strip" id="stack-strip"></div>
       <div class="combat-strip" id="combat-strip"></div>
     </div>
 
-    <div class="seat seat-me" id="seat-me">
+    <div class="seat seat-me" id="seat-me" role="region" aria-label="Your side of the table. Drop cards here to play them">
+      <div class="drop-hint" aria-hidden="true">Drop cards anywhere on your side to play them</div>
       <div class="battlefield bf-me" id="bf-me"></div>
       <div class="player-bar" id="player-bar-me"></div>
     </div>

@@ -31,13 +31,14 @@ public final class Main {
         FModel.initialize(null, null);
         System.out.printf("Card database ready in %.1fs%n", (System.currentTimeMillis() - start) / 1000.0);
 
-        final WebSession session = new WebSession();
-        gui.setSession(session);
+        final LanRoomManager manager = new LanRoomManager();
+        // Out-of-game dialogs (deck editor etc.) still go through the solo session.
+        gui.setSession(manager.soloSession());
 
-        final WebServer server = new WebServer(port, session);
+        final WebServer server = new WebServer(port, manager);
         server.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            session.shutdown();
+            manager.shutdown();
             server.stop();
         }));
 

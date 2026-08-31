@@ -25,14 +25,15 @@ import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.QueryStringDecoder;
 import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
-import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
+import io.netty.util.AttributeKey;
 
 import forge.web.CardImages;
 import forge.web.Json;
+import forge.web.LanRoomManager;
 import forge.web.MatchLauncher;
 import forge.web.WebSession;
 
-/** Serves the client, the card art endpoint and the game socket. */
+/** Serves the client, the card art endpoint, the LAN endpoints and the game socket. */
 public class RequestHandler extends SimpleChannelInboundHandler<Object> {
 
     /** Image lookups can hit the network, so they never run on an event loop thread. */
@@ -42,10 +43,10 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
         return t;
     });
 
-    private final WebSession session;
+    private final LanRoomManager manager;
 
-    public RequestHandler(final WebSession session) {
-        this.session = session;
+    public RequestHandler(final LanRoomManager manager) {
+        this.manager = manager;
     }
 
     @Override
@@ -53,23 +54,16 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
         if (msg instanceof FullHttpRequest request) {
             handleHttp(ctx, request);
         } else if (msg instanceof TextWebSocketFrame frame) {
-            session.onMessage(frame.text());
+            handleWs(ctx, frame);
         }
-    }
-
-    @Override
-    public void userEventTriggered(final ChannelHandlerContext ctx, final Object evt) throws Exception {
-        if (evt instanceof WebSocketServerProtocolHandler.HandshakeComplete) {
-            session.attach(new ChannelTransport(ctx.channel()));
-        }
-        super.userEventTriggered(ctx, evt);
     }
 
     @Override
     public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
-        session.detach(new ChannelTransport(ctx.channel()));
-        // Don't strand the game thread on a dialog nobody is going to answer.
-        session.abandonPendingRequests();
+        final Binding binding = ctx.channel().attr(BINDING).getAndSet(null);
+        if (binding != null) {
+            manager.onSocketClosed(binding.session(), binding.transport());
+        }
         super.channelInactive(ctx);
     }
 
@@ -80,6 +74,13 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
         }
         ctx.close();
     }
+
+    // ------------------------------------------------------------- websocket
+
+    private static final AttributeKey<Binding> BINDING = AttributeKey.valueOf("forge.web.binding");
+
+    /** A socket's authenticated seat, set once the first hello frame is processed. */
+    private record Binding(WebSession session, WebSession.Transport transport) { }
 
     /** Netty channel wrapped as something the game side can push text into. */
     private record ChannelTransport(Channel channel) implements WebSession.Transport {
@@ -94,6 +95,26 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
         public boolean isOpen() {
             return channel.isActive();
         }
+    }
+
+    private void handleWs(final ChannelHandlerContext ctx, final TextWebSocketFrame frame) {
+        final Binding existing = ctx.channel().attr(BINDING).get();
+        if (existing != null) {
+            existing.session().onMessage(frame.text());
+            return;
+        }
+
+        // First frame is the capability-token handshake. A blank token means solo.
+        final Map<String, Object> hello = Json.parseObject(frame.text());
+        final WebSession.Transport transport = new ChannelTransport(ctx.channel());
+        final LanRoomManager.SocketAuth auth =
+                manager.authenticateSocket(Json.str(hello, "token"), transport);
+        if (auth == null) {
+            ctx.close();
+            return;
+        }
+        ctx.channel().attr(BINDING).set(new Binding(auth.session(), transport));
+        transport.send(auth.welcomeJson());
     }
 
     // ------------------------------------------------------------------ HTTP
@@ -160,13 +181,90 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
                     return;
                 }
                 final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
-                final String error = MatchLauncher.start(session, body);
+                final String error = manager.startSolo(body);
                 final StringBuilder sb = new StringBuilder(64);
                 Json.obj(sb).put("ok", error == null).put("error", error).end();
                 sendJson(ctx, request, sb.toString());
             }
+            case "/api/lan/status" -> {
+                final StringBuilder sb = new StringBuilder(256);
+                Json.obj(sb).put("ok", true).putRaw("room", manager.room().roomBody(null)).end();
+                sendJson(ctx, request, sb.toString());
+            }
+            case "/api/lan/claim" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                final LanRoomManager.LanResult r = manager.claim(Json.str(body, "name"));
+                sendLan(ctx, request, r);
+            }
+            case "/api/lan/reconnect" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.reconnect(Json.str(body, "token")));
+            }
+            case "/api/lan/leave" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.leave(Json.str(body, "token")));
+            }
+            case "/api/lan/name" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.setName(Json.str(body, "token"), Json.str(body, "name")));
+            }
+            case "/api/lan/deck" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.setDeck(Json.str(body, "token"), Json.str(body, "deck")));
+            }
+            case "/api/lan/ready" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.setReady(Json.str(body, "token"), Json.bool(body, "ready")));
+            }
+            case "/api/lan/rule" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.setRule(Json.str(body, "token"), Json.integer(body, "startingLife", 20)));
+            }
+            case "/api/lan/start" -> {
+                if (rejectNonPost(ctx, request)) return;
+                final Map<String, Object> body = Json.parseObject(request.content().toString(StandardCharsets.UTF_8));
+                sendLan(ctx, request, manager.startLan(Json.str(body, "token")));
+            }
             default -> sendStatus(ctx, request, HttpResponseStatus.NOT_FOUND);
         }
+    }
+
+    private static boolean rejectNonPost(final ChannelHandlerContext ctx, final FullHttpRequest request) {
+        if (!HttpMethod.POST.equals(request.method())) {
+            sendStatus(ctx, request, HttpResponseStatus.METHOD_NOT_ALLOWED);
+            return true;
+        }
+        return false;
+    }
+
+    private void sendLan(final ChannelHandlerContext ctx, final FullHttpRequest request,
+            final LanRoomManager.LanResult result) {
+        final String roomJson = result.ok() && result.role() != null ? manager.room().roomBody(result.role()) : null;
+        final StringBuilder sb = new StringBuilder(128 + (roomJson == null ? 0 : roomJson.length()));
+        final Json.Obj o = Json.obj(sb);
+        o.put("ok", result.ok());
+        if (!result.ok()) {
+            o.put("error", result.error());
+        } else {
+            if (result.token() != null) {
+                o.put("token", result.token());
+            }
+            if (result.role() != null) {
+                o.put("role", result.role().name());
+            }
+            if (roomJson != null) {
+                o.putRaw("room", roomJson);
+            }
+        }
+        o.end();
+        sendJson(ctx, request, sb.toString());
     }
 
     private static String first(final Map<String, List<String>> params, final String name) {

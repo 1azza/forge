@@ -2,7 +2,6 @@ package forge.web;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,13 +47,18 @@ public class WebSession {
     private static final long PUSH_INTERVAL_MS = 50;
     /** How long a blocked engine call waits for a reply before giving up on the player. */
     private static final long ANSWER_TIMEOUT_MINUTES = 30;
-    /** Phases the client stops at by default; everything else is auto-passed. */
-    private static final Set<PhaseType> DEFAULT_STOPS = EnumSet.of(
-            PhaseType.MAIN1,
-            PhaseType.COMBAT_DECLARE_ATTACKERS,
-            PhaseType.COMBAT_DECLARE_BLOCKERS,
-            PhaseType.MAIN2,
-            PhaseType.END_OF_TURN);
+    /**
+     * Phases the client stops at by default; everything else is auto-passed. Stored as
+     * names rather than {@link PhaseType} values so constructing a session doesn't
+     * initialise the engine's {@code PhaseType} enum (which needs {@code Localizer}, only
+     * available after {@code FModel.initialize()}).
+     */
+    private static final Set<String> DEFAULT_STOPS = Set.of(
+            "MAIN1",
+            "COMBAT_DECLARE_ATTACKERS",
+            "COMBAT_DECLARE_BLOCKERS",
+            "MAIN2",
+            "END_OF_TURN");
 
     private final WebGuiGame guiGame;
     private final StateSerializer serializer;
@@ -74,13 +78,24 @@ public class WebSession {
     private final AtomicBoolean needsFullState = new AtomicBoolean(true);
     private final AtomicBoolean reportedPushFailure = new AtomicBoolean();
 
+    /**
+     * Whether the last open transport leaving should release parked engine calls. True for
+     * the solo session (a closed tab shouldn't wedge the game); false for a LAN seat, which
+     * keeps its prompt parked so the game pauses until reconnect or expiry.
+     */
+    private volatile boolean abandonOnDisconnect = true;
+
+    /** The last {@code ask} message sent, re-sent on reconnect so a paused dialog survives. */
+    private volatile String pendingAskJson;
+    private final AtomicBoolean resendAsk = new AtomicBoolean();
+
     private final ScheduledExecutorService pusher = Executors.newSingleThreadScheduledExecutor(r -> {
         final Thread t = new Thread(r, "Forge Web state push");
         t.setDaemon(true);
         return t;
     });
 
-    private final Set<PhaseType> stopAtPhases = EnumSet.copyOf(DEFAULT_STOPS);
+    private final Set<String> stopAtPhases = new java.util.HashSet<>(DEFAULT_STOPS);
 
     public WebSession() {
         guiGame = new WebGuiGame(this);
@@ -97,7 +112,7 @@ public class WebSession {
     }
 
     boolean stopsAtPhase(final PhaseType phase) {
-        return phase == null || stopAtPhases.contains(phase);
+        return phase == null || stopAtPhases.contains(phase.name());
     }
 
     // ------------------------------------------------------------- transport
@@ -106,15 +121,18 @@ public class WebSession {
     public void attach(final Transport transport) {
         transports.add(transport);
         System.out.println("Browser connected (" + transports.size() + " open)");
+        // Never serialise live state from the Netty callback: just flag the resync and let
+        // the push loop do the work on its own thread, then re-raise any parked prompt.
+        resendAsk.set(true);
         markFullResync();
-        pushIfDirty();
     }
 
     public void detach(final Transport transport) {
         transports.remove(transport);
-        // Only release parked engine calls when the last tab goes — another open tab can
-        // still answer a pending dialog.
-        if (transports.isEmpty()) {
+        // Only release parked engine calls when the last transport goes — another open
+        // transport can still answer a pending dialog — and only when this session wants
+        // to abandon on disconnect (LAN seats pause instead; the coordinator decides).
+        if (transports.isEmpty() && abandonOnDisconnect) {
             abandonPendingRequests();
         }
     }
@@ -125,6 +143,15 @@ public class WebSession {
             p.cancel();
         }
         pending.clear();
+    }
+
+    public void setAbandonOnDisconnect(final boolean abandonOnDisconnect) {
+        this.abandonOnDisconnect = abandonOnDisconnect;
+    }
+
+    /** Package-private for tests: true while the next push will be a full snapshot. */
+    boolean needsFullState() {
+        return needsFullState.get();
     }
 
     void send(final String json) {
@@ -165,6 +192,14 @@ public class WebSession {
                 send(json);
             } else if (DEBUG) {
                 System.out.println("push skipped, gameView=" + (game == null ? "null" : "present"));
+            }
+            // A reconnect needs the parked prompt re-raised even when the state snapshot
+            // was skipped (e.g. no game view yet) — the client still needs the dialog.
+            if (resendAsk.getAndSet(false)) {
+                final String ask = pendingAskJson;
+                if (ask != null) {
+                    send(ask);
+                }
             }
         } catch (final RuntimeException e) {
             // A state snapshot taken mid-mutation can trip over a collection being rebuilt.
@@ -228,12 +263,14 @@ public class WebSession {
                 sb.append(',').append(body);
             }
             sb.append('}');
+            pendingAskJson = sb.toString();
             // Flush the board first, so the dialog is answered against what's on screen.
             pushIfDirty();
             send(sb.toString());
             return waiter.await();
         } finally {
             pending.remove(rid);
+            pendingAskJson = null;
         }
     }
 
@@ -267,8 +304,11 @@ public class WebSession {
         }
         stopAtPhases.clear();
         for (final Object o : list) {
+            final String name = String.valueOf(o);
             try {
-                stopAtPhases.add(PhaseType.valueOf(String.valueOf(o)));
+                // Validate against the engine's enum, but store the name so the default
+                // set doesn't need the enum loaded at construction time.
+                stopAtPhases.add(PhaseType.valueOf(name).name());
             } catch (final IllegalArgumentException ignored) {
                 // client sent a phase we don't know; ignore rather than reject the batch
             }
