@@ -44,9 +44,10 @@ const state = {
 };
 
 // LAN multiplayer identity. The token is a capability secret issued by the server on
-// claim; it lives in localStorage so a refresh can reconnect to the same seat.
+// claim; it lives in sessionStorage so a refresh can reconnect to the same seat without
+// making every tab in the browser impersonate that seat.
 const lan = {
-  token: localStorage.getItem('forge.lan.token') || null,
+  token: sessionStorage.getItem('forge.lan.token') || null,
   role: null,       // 'HOST' | 'OPPONENT' | null (null while solo)
   room: null,       // last lobby snapshot
 };
@@ -1361,7 +1362,7 @@ function onRoom(msg) {
   // rejoin rather than stranding us in an empty lobby.
   const mySeat = (msg.seats || []).find((s) => s.role === lan.role);
   if (lan.token && lan.role && (!mySeat || !mySeat.name)) {
-    localStorage.removeItem('forge.lan.token');
+    sessionStorage.removeItem('forge.lan.token');
     lan.token = null;
     lan.role = null;
     lan.room = null;
@@ -1421,7 +1422,7 @@ async function tryReconnectLan() {
   } catch (e) {
     // fall through and clear the stale token
   }
-  localStorage.removeItem('forge.lan.token');
+  sessionStorage.removeItem('forge.lan.token');
   lan.token = null;
   lan.role = null;
   lan.room = null;
@@ -1439,7 +1440,7 @@ async function joinLan() {
     }
     lan.token = r.token;
     lan.role = r.role;
-    localStorage.setItem('forge.lan.token', r.token);
+    sessionStorage.setItem('forge.lan.token', r.token);
     if (r.room) {
       lan.room = r.room;
       renderLanRoom(r.room);
@@ -1454,7 +1455,7 @@ async function joinLan() {
 function leaveLan() {
   if (!lan.token) return;
   lanPost('/api/lan/leave', { token: lan.token }).then((r) => {
-    localStorage.removeItem('forge.lan.token');
+    sessionStorage.removeItem('forge.lan.token');
     lan.token = null;
     lan.role = null;
     lan.room = null;

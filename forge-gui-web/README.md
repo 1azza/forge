@@ -98,7 +98,7 @@ all interfaces by default. You will need to allow inbound TCP on the configured 
 host's firewall.
 
 **Identity and reconnection.** Claiming a seat returns an opaque random capability token,
-stored in the browser's `localStorage`; the server keeps only its SHA-256 hash. The token is
+stored in the browser tab's `sessionStorage`; the server keeps only its SHA-256 hash. The token is
 sent on the WebSocket's first frame and on every lobby HTTP mutation, and is never echoed in
 a room broadcast. A refresh reconnects with the stored token and restores the same seat; a
 disconnected seat stays reserved for `-Dforge.web.lan.grace.seconds` (default 90 s). During
