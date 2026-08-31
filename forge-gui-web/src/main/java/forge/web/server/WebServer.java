@@ -9,7 +9,11 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.codec.http.HttpContentCompressor;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.stream.ChunkedWriteHandler;
@@ -49,6 +53,7 @@ public class WebServer {
                         final ChannelPipeline pipeline = ch.pipeline();
                         pipeline.addLast(new HttpServerCodec());
                         pipeline.addLast(new HttpObjectAggregator(MAX_CONTENT_LENGTH));
+                        pipeline.addLast(new TextCompressor());
                         pipeline.addLast(new ChunkedWriteHandler());
                         // Passes non-websocket requests through to the HTTP handler below.
                         pipeline.addLast(new WebSocketServerProtocolHandler(WEBSOCKET_PATH, null, true));
@@ -72,6 +77,27 @@ public class WebServer {
         }
         if (workerGroup != null) {
             workerGroup.shutdownGracefully();
+        }
+    }
+
+    /**
+     * Gzip for client assets and JSON — app.js and app.css shrink to about a quarter —
+     * while leaving everything else untouched: card art is already compressed and would
+     * only pay CPU for it, non-200 replies have no body worth the trouble, and the
+     * WebSocket handshake must not be wrapped at all or the browser refuses the socket.
+     */
+    private static final class TextCompressor extends HttpContentCompressor {
+        @Override
+        protected Result beginEncode(final HttpResponse response, final String acceptEncoding)
+                throws Exception {
+            if (response.status() != HttpResponseStatus.OK) {
+                return null;
+            }
+            final String contentType = response.headers().get(HttpHeaderNames.CONTENT_TYPE, "");
+            if (!contentType.startsWith("text/") && !contentType.contains("json")) {
+                return null;
+            }
+            return super.beginEncode(response, acceptEncoding);
         }
     }
 }

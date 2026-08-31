@@ -123,11 +123,13 @@ public class RequestHandler extends SimpleChannelInboundHandler<Object> {
                 final String key = first(query.parameters(), "key");
                 final String name = first(query.parameters(), "name");
                 final String set = first(query.parameters(), "set");
+                // Thumbnails are the common case; the inspector explicitly asks for normal.
+                final boolean small = "small".equals(first(query.parameters(), "size"));
                 // Retain the request; the worker thread replies after this call returns.
                 request.retain();
                 imageWorkers.execute(() -> {
                     try {
-                        final byte[] image = CardImages.get(key, name, set);
+                        final byte[] image = CardImages.get(key, name, set, small);
                         ctx.executor().execute(() -> {
                             if (image == null) {
                                 sendStatus(ctx, request, HttpResponseStatus.NOT_FOUND);

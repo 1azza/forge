@@ -56,8 +56,10 @@ does on the desktop.
 
 Card art comes from `/api/card-image`, which prefers an image the user has already
 downloaded through Forge, then its own disk cache, then Scryfall (rate-limited and
-cached). Images are served with a long `Cache-Control`, so each printing is fetched once
-per install.
+cached). Board and hand thumbnails are served small (`size=small`, Scryfall's 146px
+printing or a downscaled copy of the local art, cached separately); the hover inspector
+asks for `size=normal` full art. Images are served with a long `Cache-Control`, so each
+printing at each size is fetched once per install.
 
 ## Match lifecycle
 

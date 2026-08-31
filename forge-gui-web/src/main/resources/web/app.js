@@ -66,6 +66,19 @@ let lastPool = {};
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
+// JSON.stringify per card per paint is the hottest loop on the client; the server only
+// replaces a card object when it actually changed, so memoise on identity and unchanged
+// cards cost nothing.
+const sigCache = new WeakMap();
+function signature(card) {
+  let sig = sigCache.get(card);
+  if (sig === undefined) {
+    sig = JSON.stringify(card);
+    sigCache.set(card, sig);
+  }
+  return sig;
+}
+
 /**
  * Applies a transient animation class and removes it after {@code ms}, unconditionally.
  * Cleanup by animationend alone is not safe: a background tab suspends CSS animations,
@@ -317,18 +330,24 @@ function draw() {
 /**
  * Attack lines drawn between where the cards actually are: attacker card to the first
  * blocker, or to the defending player's bar for unblocked attacks. Redrawn on every
- * paint while combat exists; empty otherwise.
+ * paint while combat exists; empty otherwise. Path elements are kept per band so the
+ * draw-in stroke animates once, when the arrow first appears.
  */
+let arrowNodes = new Map();
 function drawCombatArrows() {
   const svg = $('combat-svg');
   const bands = (state.combat && state.combat.bands) || [];
   if (!bands.length || onSetupScreen) {
-    svg.replaceChildren();
+    if (arrowNodes.size) {
+      arrowNodes.clear();
+      svg.replaceChildren();
+    }
     return;
   }
   const board = svg.parentElement.getBoundingClientRect();
-  const ns = 'http://www.w3.org/2000/svg';
+  const next = new Map();
   const frag = document.createDocumentFragment();
+  const ns = 'http://www.w3.org/2000/svg';
 
   for (const band of bands) {
     const from = cardAnchor(band.attacker, 'top', board);
@@ -351,18 +370,25 @@ function drawCombatArrows() {
     // A gentle quadratic bow above the straight line; the sag scales with distance.
     const cx = (from.x + to.x) / 2;
     const cy = Math.min(from.y, to.y) - Math.abs(to.x - from.x) * 0.10 - 16;
-    const path = document.createElementNS(ns, 'path');
-    path.setAttribute('d', `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`);
-    path.setAttribute('class', blockers.length ? 'arrow blocked' : 'arrow attack');
-    frag.append(path);
-
-    const dot = document.createElementNS(ns, 'circle');
-    dot.setAttribute('cx', to.x);
-    dot.setAttribute('cy', to.y);
-    dot.setAttribute('r', 3.5);
-    dot.setAttribute('class', (blockers.length ? 'arrow blocked' : 'arrow attack') + ' tip');
-    frag.append(dot);
+    const cls = blockers.length ? 'arrow blocked' : 'arrow attack';
+    const key = `${band.attacker}>${blockers.join('.')}@${band.defender}`;
+    let pair = arrowNodes.get(key);
+    if (!pair) {
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('pathLength', '1');
+      path.setAttribute('class', cls + ' drawn');
+      const dot = document.createElementNS(ns, 'circle');
+      dot.setAttribute('r', 3.5);
+      dot.setAttribute('class', cls + ' tip');
+      pair = { path, dot };
+    }
+    pair.path.setAttribute('d', `M ${from.x} ${from.y} Q ${cx} ${cy} ${to.x} ${to.y}`);
+    pair.dot.setAttribute('cx', to.x);
+    pair.dot.setAttribute('cy', to.y);
+    next.set(key, pair);
+    frag.append(pair.path, pair.dot);
   }
+  arrowNodes = next;
   svg.replaceChildren(frag);
 }
 
@@ -428,61 +454,89 @@ function drawPlayerBar(el, player) {
     + (player.hl ? ' targetable' : '');
   el.onclick = () => action('player', { id: player.id });
 
+  // Built once, patched afterwards. Rebuilding on every paint would churn the DOM and
+  // restart the priority pulse; patching also lets zone counts flash exactly when their
+  // value changes.
+  let ui = el._ui;
+  if (!ui) {
+    const avatar = document.createElement('div');
+    avatar.className = 'avatar';
+
+    const life = document.createElement('span');
+    life.className = 'life';
+
+    const who = document.createElement('div');
+    who.className = 'who';
+    const name = document.createElement('span');
+    name.className = 'name';
+    const subtitle = document.createElement('span');
+    subtitle.className = 'subtitle';
+    who.append(name, subtitle);
+
+    const zoneWrap = document.createElement('div');
+    zoneWrap.className = 'zones';
+    const chips = {};
+    for (const label of ['Hand', 'Library', 'Graveyard', 'Exile']) {
+      const chip = document.createElement('div');
+      chip.className = 'zone-chip';
+      const text = document.createElement('span');
+      text.textContent = label;
+      const count = document.createElement('b');
+      count.textContent = '0';
+      chip.append(text, count);
+      zoneWrap.append(chip);
+      chips[label] = { chip, count };
+    }
+
+    // display:contents keeps the wrapper out of the flex layout, so the badges flow
+    // exactly as they did when they were appended to the bar itself.
+    const counters = document.createElement('div');
+    counters.className = 'counters';
+
+    el.append(avatar, life, who, zoneWrap, counters);
+    ui = el._ui = { avatar, life, name, subtitle, chips, counters, lastLife: null, counterKey: null };
+  }
+
+  ui.avatar.textContent = (player.name || '?').charAt(0).toUpperCase();
+  ui.name.textContent = player.name;
+  ui.subtitle.textContent = player.ai ? 'AI opponent' : 'You';
+
+  ui.life.textContent = player.life;
+  ui.life.className = 'life' + (player.life <= 5 ? ' low' : '');
+  const dropped = ui.lastLife !== null && ui.lastLife > player.life;
+  const rose = ui.lastLife !== null && ui.lastLife < player.life;
+  if (dropped || rose) {
+    flashClass(ui.life, dropped ? 'dropped' : 'rose', 650);
+  }
+  ui.lastLife = player.life;
+
   const zones = [
     ['Hand', player.hand, null],
     ['Library', player.library, null],
     ['Graveyard', (player.gy || []).length, () => showZone(`${player.name} — graveyard`, player.gy)],
     ['Exile', (player.exile || []).length, () => showZone(`${player.name} — exile`, player.exile)],
   ];
-
-  // Rebuilt each draw (a handful of nodes). The life flash animates exactly when the
-  // life value differs from the last paint, because the fresh node carries the class
-  // only then — no need to track or cancel animation state.
-  const dropped = el.dataset.life !== undefined && Number(el.dataset.life) > player.life;
-  const rose = el.dataset.life !== undefined && Number(el.dataset.life) < player.life;
-
-  el.replaceChildren();
-
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = (player.name || '?').charAt(0).toUpperCase();
-
-  const life = document.createElement('span');
-  life.className = 'life'
-    + (player.life <= 5 ? ' low' : '')
-    + (dropped ? ' dropped' : rose ? ' rose' : '');
-  life.textContent = player.life;
-
-  const who = document.createElement('div');
-  who.className = 'who';
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = player.name;
-  const subtitle = document.createElement('span');
-  subtitle.className = 'subtitle';
-  subtitle.textContent = player.ai ? 'AI opponent' : 'You';
-  who.append(name, subtitle);
-
-  const zoneWrap = document.createElement('div');
-  zoneWrap.className = 'zones';
   for (const [label, count, onClick] of zones) {
-    const chip = document.createElement('div');
-    chip.className = 'zone-chip' + (onClick && count ? ' clickable' : '');
-    chip.innerHTML = `${label} <b>${count ?? 0}</b>`;
-    if (onClick && count) {
-      chip.onclick = (e) => { e.stopPropagation(); onClick(); };
+    const slot = ui.chips[label];
+    const value = String(count ?? 0);
+    if (slot.count.textContent !== value) {
+      slot.count.textContent = value;
+      // A count change draws the eye — did the graveyard just grow?
+      flashClass(slot.count, 'bump', 450);
     }
-    zoneWrap.append(chip);
+    slot.chip.className = 'zone-chip' + (onClick && count ? ' clickable' : '');
+    slot.chip.onclick = onClick ? (e) => { e.stopPropagation(); onClick(); } : null;
   }
 
-  el.append(avatar, life, who, zoneWrap);
-  el.dataset.life = player.life;
-
-  for (const [type, n] of Object.entries(player.counters || {})) {
-    const badge = document.createElement('span');
-    badge.className = 'badge counter';
-    badge.textContent = `${type} ${n}`;
-    el.append(badge);
+  const counterKey = JSON.stringify(player.counters || {});
+  if (counterKey !== ui.counterKey) {
+    ui.counterKey = counterKey;
+    ui.counters.replaceChildren(...Object.entries(player.counters || {}).map(([type, n]) => {
+      const badge = document.createElement('span');
+      badge.className = 'badge counter';
+      badge.textContent = `${type} ${n}`;
+      return badge;
+    }));
   }
 }
 
@@ -496,8 +550,9 @@ function drawBattlefield(el, player) {
   const ids = (player.bf || []).slice().sort((a, b) => rank(a) - rank(b));
   syncCards(el, ids);
   // Once the row overflows, overlap cards like a held fan instead of wrapping into a
-  // scrolling second row where half the board hides behind a scrollbar.
-  el.classList.toggle('dense', el.childElementCount > 14);
+  // scrolling second row where half the board hides behind a scrollbar. Counted off the
+  // zone data, not the DOM, so transient leave-ghosts don't flip the mode.
+  el.classList.toggle('dense', ids.length > 14);
 }
 
 function rank(id) {
@@ -514,10 +569,12 @@ function drawHand(player) {
   const el = $('hand');
   syncCards(el, (player && player.handCards) || []);
   // Arc fan: rotate around a pivot below the hand, sink the outer cards, and tighten
-  // the overlap as the hand grows.
-  const n = el.childElementCount;
+  // the overlap as the hand grows. Leave-ghosts are excluded: they keep the pose they
+  // froze in and shouldn't re-space the living cards.
+  const cards = [...el.children].filter((node) => !node.classList.contains('leaving'));
+  const n = cards.length;
   const overlap = n > 9 ? -0.34 : n > 6 ? -0.18 : 0;
-  [...el.children].forEach((node, i) => {
+  cards.forEach((node, i) => {
     const off = i - (n - 1) / 2;
     node.style.setProperty('--rot', `${clamp(off * 2.4, -13, 13)}deg`);
     node.style.setProperty('--lift', `${Math.abs(off) * Math.abs(off) * 1.15}px`);
@@ -527,10 +584,12 @@ function drawHand(player) {
 
 // Reuses existing card nodes where possible; only re-renders a card whose data changed.
 // Brand-new nodes get an arrival animation — drawn from below in hand, summoned with a
-// gold impact ring on the battlefield — and cards whose damage went up flash once.
+// gold impact ring on the battlefield — and cards whose damage went up flash once and
+// float the hit as a number. Cards that leave dissolve in place as ghosts.
 function syncCards(container, ids) {
   const existing = new Map();
   for (const node of container.children) {
+    if (node.classList.contains('leaving')) continue; // ghosts are self-removing
     existing.set(Number(node.dataset.id), node);
   }
   const nodes = [];
@@ -538,14 +597,14 @@ function syncCards(container, ids) {
     const card = state.cards.get(id);
     if (!card) continue;
     let node = existing.get(id);
-    const signature = JSON.stringify(card);
+    const sig = signature(card);
     const prevDamage = node ? Number(node.dataset.dmg || 0) : 0;
-    if (node && node.dataset.sig === signature) {
+    if (node && node.dataset.sig === sig) {
       existing.delete(id);
     } else {
       const isNew = !node;
       node = renderCard(card, node);
-      node.dataset.sig = signature;
+      node.dataset.sig = sig;
       existing.delete(id);
       if (isNew) {
         flashClass(node, container.id === 'hand' ? 'entering-hand' : 'entering-bf', 650);
@@ -553,15 +612,47 @@ function syncCards(container, ids) {
     }
     if ((card.damage || 0) > prevDamage) {
       flashClass(node, 'hit', 650);
+      floatDamage(node, (card.damage || 0) - prevDamage);
     }
     nodes.push(node);
   }
-  for (const stale of existing.values()) {
-    stale.remove();
-  }
+  // Rects must be captured while the stale nodes are still in the flow.
+  const stale = [...existing.values()].map((node) => ({ node, rect: node.getBoundingClientRect() }));
   // replaceChildren with the ordered list is one layout pass and keeps node identity,
   // so CSS transitions on the surviving cards aren't restarted.
   container.replaceChildren(...nodes);
+  for (const { node, rect } of stale) {
+    ghost(node, rect, container);
+  }
+}
+
+/** A card that left the zone dissolves where it stood rather than vanishing: parked
+ *  absolutely at its last position so layout forgets it instantly, then faded out.
+ *  Skipped when the tab is hidden — CSS transitions freeze in background tabs and the
+ *  ghost would never fade (same reasoning as flashClass). */
+function ghost(node, rect, container) {
+  if (document.hidden) return;
+  const bounds = container.getBoundingClientRect();
+  node.classList.add('leaving');
+  node.style.position = 'absolute';
+  node.style.left = `${rect.left - bounds.left + container.scrollLeft}px`;
+  node.style.top = `${rect.top - bounds.top + container.scrollTop}px`;
+  node.style.marginLeft = '0';
+  node.style.zIndex = '1';
+  node.tabIndex = -1;
+  node.setAttribute('aria-hidden', 'true');
+  container.append(node);
+  setTimeout(() => node.remove(), 420);
+}
+
+/** Damage dealt shows up as a floating "-n" over the card. */
+function floatDamage(node, delta) {
+  if (document.hidden || delta <= 0) return;
+  const mark = document.createElement('span');
+  mark.className = 'float-dmg';
+  mark.textContent = `-${delta}`;
+  node.append(mark);
+  setTimeout(() => mark.remove(), 950);
 }
 
 function renderCard(card, reuse) {
@@ -584,15 +675,25 @@ function renderCard(card, reuse) {
     + (card.blocking ? ' blocking' : '')
     + (card.hidden ? ' hidden-card' : '');
 
+  // Keep the already-loaded <img> when the art didn't change: rebuilding it re-decodes
+  // and can flash, and state-only updates (tapped, damage, counters) come through here
+  // all the time.
+  const oldImg = reuse ? reuse.querySelector(':scope > img') : null;
+
   el.replaceChildren();
 
   if (!card.hidden) {
-    const img = document.createElement('img');
-    img.loading = 'lazy';
-    img.decoding = 'async';
-    img.alt = card.name || '';
-    img.src = imageUrl(card);
-    img.onerror = () => { img.remove(); el.prepend(facelet(card)); };
+    const src = imageUrl(card);
+    let img = oldImg;
+    if (!img || img.getAttribute('src') !== src) {
+      img = document.createElement('img');
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.alt = card.name || '';
+      img.src = src;
+      img.onerror = () => { img.remove(); el.prepend(facelet(card)); };
+    }
+    img.setAttribute('fetchpriority', 'high');
     el.append(img);
   }
 
@@ -665,43 +766,60 @@ function shortCounter(type, n) {
   return `${type} ${n}`;
 }
 
-function imageUrl(card) {
+/** Card art URL. Thumbnails are the default; the inspector passes 'normal' for full art. */
+function imageUrl(card, size = 'small') {
   const params = new URLSearchParams();
   if (card.img) params.set('key', card.img);
   if (card.name) params.set('name', card.name);
   if (card.set) params.set('set', card.set);
+  params.set('size', size);
   return `/api/card-image?${params}`;
 }
 
+// Stack nodes are kept and diffed, not rebuilt: rebuilding on every push would replay
+// the pop animation and re-create the thumbnail <img> twenty times a second during a
+// cascade. Identical duplicates (two of the same spell) get distinct occurrence keys.
+let stackNodes = new Map();
 function drawStack() {
   const el = $('stack-strip');
-  el.replaceChildren(...state.stack.map((item) => {
-    const div = document.createElement('div');
-    div.className = 'stack-item' + (item.trigger ? ' trigger' : '');
-    // A thumbnail beats a name: the spell is recognisable at a glance.
-    const card = state.cards.get(item.src);
-    if (card && !card.hidden) {
-      const img = document.createElement('img');
-      img.loading = 'lazy';
-      img.decoding = 'async';
-      img.alt = '';
-      img.src = imageUrl(card);
-      img.onerror = () => img.remove();
-      div.append(img);
+  const seen = new Map();
+  const next = new Map();
+  for (const item of state.stack) {
+    const key = `${item.src}|${item.srcName}|${item.text}|${item.trigger ? 1 : 0}`;
+    const n = seen.get(key) || 0;
+    seen.set(key, n + 1);
+    const occurrenceKey = `${key}#${n}`;
+    let div = stackNodes.get(occurrenceKey);
+    if (!div) {
+      div = document.createElement('div');
+      div.className = 'stack-item' + (item.trigger ? ' trigger' : '');
+      // A thumbnail beats a name: the spell is recognisable at a glance.
+      const card = state.cards.get(item.src);
+      if (card && !card.hidden) {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.alt = '';
+        img.src = imageUrl(card);
+        img.onerror = () => img.remove();
+        div.append(img);
+      }
+      const src = document.createElement('span');
+      src.className = 'src';
+      src.textContent = item.srcName || '';
+      const txt = document.createElement('span');
+      txt.className = 'txt';
+      txt.textContent = item.text || '';
+      div.append(src, txt);
+      div.onmouseenter = () => {
+        if (card) inspect(card);
+      };
+      div.onmouseleave = hideInspector;
     }
-    const src = document.createElement('span');
-    src.className = 'src';
-    src.textContent = item.srcName || '';
-    const txt = document.createElement('span');
-    txt.className = 'txt';
-    txt.textContent = item.text || '';
-    div.append(src, txt);
-    div.onmouseenter = () => {
-      if (card) inspect(card);
-    };
-    div.onmouseleave = hideInspector;
-    return div;
-  }));
+    next.set(occurrenceKey, div);
+  }
+  stackNodes = next;
+  el.replaceChildren(...next.values());
 }
 
 function drawCombat() {
@@ -779,7 +897,7 @@ function inspect(card) {
   const panel = $('inspector');
   const img = $('inspector-img');
   img.hidden = false;
-  img.src = imageUrl(card);
+  img.src = imageUrl(card, 'normal');
   img.onerror = () => { img.hidden = true; };
   $('inspector-name').textContent = card.name || '';
   $('inspector-type').textContent = card.type || '';
@@ -1213,6 +1331,41 @@ document.addEventListener('keydown', (e) => {
     action('undo');
   }
 });
+
+// Pointer-tracked 3D tilt on the card under the cursor. Applied to the art <img>, so it
+// composes with every card-level transform (tapped, hand arc, hover lift) instead of
+// fighting them. Mouse-only, and skipped entirely for reduced-motion users.
+if (matchMedia('(hover: hover) and (pointer: fine)').matches
+    && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  let tilted = null;
+  const untilt = () => {
+    if (tilted) {
+      tilted.style.removeProperty('--tx');
+      tilted.style.removeProperty('--ty');
+      tilted = null;
+    }
+  };
+  for (const id of ['hand', 'bf-me', 'bf-opponent']) {
+    const zone = $(id);
+    zone.addEventListener('pointermove', (e) => {
+      const card = e.target.closest('.card');
+      if (!card || card.classList.contains('leaving')) {
+        untilt();
+        return;
+      }
+      if (card !== tilted) {
+        untilt();
+        tilted = card;
+      }
+      const r = card.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width - 0.5;
+      const py = (e.clientY - r.top) / r.height - 0.5;
+      card.style.setProperty('--ty', `${(px * 9).toFixed(2)}deg`);
+      card.style.setProperty('--tx', `${(-py * 9).toFixed(2)}deg`);
+    });
+    zone.addEventListener('pointerleave', untilt);
+  }
+}
 
 loadDecks();
 connect();
