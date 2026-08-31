@@ -1,0 +1,67 @@
+# CI for forge-gui-web, this fork's browser front end.
+#
+# The module has no unit test suite (see forge-gui-web/README.md), so the test stage is a
+# smoke test: boot the packaged jar headless, wait for the card database to load, and hit
+# the endpoints a browser needs. Serving the client from the jar (no -Dforge.web.static)
+# also verifies the web resources actually get packaged.
+#
+# Upstream's test-build.yaml runs the full reactor test suite on every push; this job is
+# the fast, fork-specific check.
+
+name: Forge Web CI
+
+on:
+  push:
+    branches: [master, web-client]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # -am is mandatory with -pl: the parent pom uses CI-friendly ${revision} versioning,
+      # and a single-module build without the reactor fails with
+      # "forge:forge:pom:${revision} not found".
+      - name: Build forge-gui-web and its dependencies
+        run: mvn -B -pl forge-gui-web -am -DskipTests package
+
+      - name: Smoke test the packaged jar
+        run: |
+          java -Dforge.assets.dir=forge-gui/ -jar forge-gui-web/target/forge-gui-web-*.jar 7860 > server.log 2>&1 &
+
+          # First start loads the card database; poll until the server answers.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:7860/api/decks > /dev/null 2>&1; then
+              echo "Server up after ~$((i * 3))s"
+              break
+            fi
+            sleep 3
+          done
+
+          curl -sf http://localhost:7860/ | grep -q '<title>Forge</title>'
+          curl -sf http://localhost:7860/app.js | grep -q 'WebSocket'
+          curl -sf http://localhost:7860/api/decks
+          echo
+          echo "--- server log tail ---"
+          tail -5 server.log
+
+      - name: Stop server
+        if: always()
+        run: pkill -f forge-gui-web || true
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-gui-web-jar
+          path: forge-gui-web/target/forge-gui-web-*.jar
+          if-no-files-found: error

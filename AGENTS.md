@@ -45,10 +45,12 @@ java -Dforge.assets.dir=forge-gui/ -Dforge.web.static=forge-gui-web/src/main/res
 
 ## Verifying changes
 
-The web client has no build step and no test suite. Verify by playing: start a game, keep
+The web client has no unit test suite. Verify by playing: start a game, keep
 a hand, play a land, end turn, concede, start a new game — then read the server console
-for stack traces. Engine or AI changes: `mvn test` on the touched module (the full-suite
-run lives in CI, `.github/workflows/test-build.yaml`).
+for stack traces. CI (`.github/workflows/forge-gui-web.yml`) builds the module and
+smoke-tests the packaged jar on every push to `master`/`web-client`. Engine or AI
+changes: `mvn test` on the touched module (the full-suite run lives in CI,
+`.github/workflows/test-build.yaml`).
 
 ## Module map
 
