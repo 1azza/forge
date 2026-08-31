@@ -27,7 +27,13 @@ const state = {
 
 let socket = null;
 let reconnectDelay = 500;
-let started = false;
+// The server keeps pushing the last game's board after it ends, so which screen we're on
+// is the client's decision, not something to infer from whether state has arrived.
+let onSetupScreen = true;
+// Set while the player is deliberately back on the setup screen, so an incoming state
+// push for the old game doesn't yank them onto the table again.
+let holdSetupScreen = false;
+let gameOverDismissed = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -95,20 +101,46 @@ function applyState(msg) {
   state.turn = msg.turn ?? 0;
   state.phase = msg.phase || '';
   state.phaseId = msg.phaseId || '';
+  state.mulligan = !!msg.mulligan;
   state.turnPlayer = msg.turnPlayer ?? null;
   state.stack = msg.stack || [];
   state.combat = msg.combat || {};
   state.log = msg.log || [];
   state.prompt = msg.prompt || null;
+  if (!state.gameOver && msg.gameOver) {
+    // A fresh result: make sure the overlay shows even if it was dismissed last game.
+    gameOverDismissed = false;
+  }
   state.gameOver = !!msg.gameOver;
   state.winner = msg.winner;
 
-  if (!started && state.players.length) {
-    started = true;
-    $('setup').hidden = true;
-    $('table').hidden = false;
+  if (onSetupScreen && state.players.length && !holdSetupScreen) {
+    showTable();
   }
   render();
+}
+
+function showTable() {
+  onSetupScreen = false;
+  holdSetupScreen = false;
+  $('setup').hidden = true;
+  $('table').hidden = false;
+  const button = $('start');
+  button.disabled = false;
+  button.textContent = 'Start game';
+}
+
+function showSetup() {
+  onSetupScreen = true;
+  holdSetupScreen = true;
+  gameOverDismissed = false;
+  $('gameover').hidden = true;
+  $('table').hidden = true;
+  $('setup').hidden = false;
+  $('setup-error').hidden = true;
+  const button = $('start');
+  button.disabled = false;
+  button.textContent = 'Start game';
 }
 
 const me = () => state.players.find((p) => p.id === state.me) || state.players.find((p) => p.local);
@@ -135,6 +167,7 @@ function draw() {
 
   $('turn-number').textContent = `Turn ${state.turn}`;
   $('phase-name').textContent = state.phase;
+  $('btn-concede').disabled = isGameStarting();
   drawPhaseTrack();
 
   if (them) drawPlayerBar($('player-bar-opponent'), them);
@@ -148,6 +181,18 @@ function draw() {
   drawPrompt();
   drawManaPool(mine);
   drawLog();
+  drawGameOver(mine);
+}
+
+function drawGameOver(mine) {
+  const show = state.gameOver && !gameOverDismissed && !onSetupScreen;
+  $('gameover').hidden = !show;
+  if (!show) return;
+  const won = mine && state.winner === mine.name;
+  $('gameover-title').textContent = state.winner ? (won ? 'You win' : 'You lose') : 'Game over';
+  $('gameover-detail').textContent = state.winner
+    ? `${state.winner} wins on turn ${state.turn}.`
+    : `The game ended on turn ${state.turn}.`;
 }
 
 function drawPhaseTrack() {
@@ -674,6 +719,38 @@ function buildAmounts(msg, body, buttons) {
   }
 }
 
+/**
+ * A confirmation that belongs to the client rather than the engine. Reuses the modal so
+ * it matches the engine's own prompts, and avoids window.confirm, which blocks the event
+ * loop and so stalls the socket while it's open.
+ */
+function localConfirm(title, message, confirmLabel) {
+  return new Promise((resolve) => {
+    dialogRid = null;
+    $('modal-title').textContent = title;
+    $('modal-message').textContent = message;
+    $('modal-body').replaceChildren();
+
+    const cancel = document.createElement('button');
+    cancel.className = 'secondary';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = () => finish(false);
+
+    const ok = document.createElement('button');
+    ok.className = 'primary';
+    ok.textContent = confirmLabel;
+    ok.onclick = () => finish(true);
+
+    $('modal-buttons').replaceChildren(cancel, ok);
+    $('modal-backdrop').hidden = false;
+
+    function finish(result) {
+      $('modal-backdrop').hidden = true;
+      resolve(result);
+    }
+  });
+}
+
 function showZone(title, ids) {
   const cards = (ids || []).map((id) => state.cards.get(id)).filter(Boolean);
   if (!cards.length) return;
@@ -776,6 +853,9 @@ $('start').onclick = async () => {
     });
     const result = await response.json();
     if (!result.ok) throw new Error(result.error || 'Could not start the game.');
+    // The table appears on the first state push from the new match.
+    holdSetupScreen = false;
+    gameOverDismissed = false;
   } catch (e) {
     $('setup-error').textContent = e.message;
     $('setup-error').hidden = false;
@@ -786,8 +866,35 @@ $('start').onclick = async () => {
 
 $('btn-ok').onclick = () => action('ok');
 $('btn-cancel').onclick = () => action('cancel');
-$('btn-concede').onclick = () => {
-  if (confirm('Concede this game?')) action('concede');
+// The engine can't end a game before the first turn begins (coin toss, keep/mulligan) —
+// the desktop client refuses the same concede — so don't offer it while turn is 0.
+function isGameStarting() {
+  return !state.gameOver && (state.mulligan || state.turn === 0);
+}
+
+$('btn-concede').onclick = async () => {
+  if (isGameStarting()) {
+    toast("Can't concede while opening hands are being decided.");
+    return;
+  }
+  if (await localConfirm('Concede', 'Concede this game to your opponent?', 'Concede')) {
+    action('concede');
+  }
+};
+$('btn-new').onclick = async () => {
+  if (isGameStarting()) {
+    toast("Can't leave while opening hands are being decided.");
+    return;
+  }
+  if (state.gameOver
+      || await localConfirm('New game', 'Leave this game and set up a new one?', 'Leave game')) {
+    showSetup();
+  }
+};
+$('btn-gameover-new').onclick = showSetup;
+$('btn-review').onclick = () => {
+  gameOverDismissed = true;
+  render();
 };
 $('btn-log').onclick = () => { $('logpanel').hidden = false; drawLog(); };
 $('btn-log-close').onclick = () => { $('logpanel').hidden = true; };

@@ -69,6 +69,8 @@ raises.
 ## What isn't, yet
 
 - Sideboarding between games — the main deck is carried over unchanged.
+- Conceding or leaving is refused while opening hands are being decided. The engine can't
+  end a game mid-mulligan, and the desktop client refuses the same request.
 - Limited, Quest, Adventure, Commander and the other game modes; the lobby only builds
   constructed matches.
 - Multiplayer and spectating. One browser session per server process.

@@ -582,6 +582,31 @@ button:disabled { opacity: 0.4; cursor: default; }
   font: inherit;
 }
 
+/* -------------------------------------------------------------- game over */
+
+.gameover {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 6, 9, 0.6);
+  backdrop-filter: blur(3px);
+  z-index: 45;
+  animation: fade 160ms var(--ease);
+}
+.gameover-card {
+  width: min(420px, 90vw);
+  padding: 28px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-3);
+}
+.gameover-card h2 { margin: 0 0 6px; font-size: 22px; }
+.gameover-card p { margin: 0 0 22px; font-size: 13px; }
+.gameover-buttons { display: flex; gap: 8px; justify-content: center; }
+
 /* ----------------------------------------------------------------- toasts */
 
 .toasts {

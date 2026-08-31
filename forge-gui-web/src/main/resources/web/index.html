@@ -31,6 +31,7 @@
     <ol id="phase-track" class="phase-track"></ol>
     <div class="topbar-actions">
       <button id="btn-log" class="ghost" title="Game log">Log</button>
+      <button id="btn-new" class="ghost" title="Leave this game and set up a new one">New game</button>
       <button id="btn-concede" class="ghost danger" title="Concede">Concede</button>
     </div>
   </header>
@@ -67,6 +68,17 @@
     <header><h2>Game log</h2><button id="btn-log-close" class="ghost">Close</button></header>
     <ol id="log-lines"></ol>
   </aside>
+
+  <div class="gameover" id="gameover" hidden>
+    <div class="gameover-card">
+      <h2 id="gameover-title">Game over</h2>
+      <p id="gameover-detail" class="muted"></p>
+      <div class="gameover-buttons">
+        <button id="btn-review" class="secondary">Review board</button>
+        <button id="btn-gameover-new" class="primary">New game</button>
+      </div>
+    </div>
+  </div>
 
   <footer class="prompt" id="prompt">
     <div class="mana-pool" id="mana-pool"></div>
